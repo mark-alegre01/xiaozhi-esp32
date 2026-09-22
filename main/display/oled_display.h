@@ -21,6 +21,14 @@ private:
     lv_obj_t* emotion_label_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
 
+    lv_obj_t* eyes_container_ = nullptr;
+    lv_obj_t* left_eye_ = nullptr;
+    lv_obj_t* right_eye_ = nullptr;
+    lv_timer_t* blink_timer_ = nullptr;
+
+    void CreateRobotEyes(lv_obj_t* parent);
+    static void BlinkTimerCallback(lv_timer_t* timer);
+
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 
