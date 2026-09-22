@@ -1,0 +1,59 @@
+name: Build Robot Eyes Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: 'Voice & UI Language'
+        required: true
+        default: 'en-US'
+        type: choice
+        options:
+          - en-US
+          - fil-PH
+          - zh-CN
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build bread-compact-wifi-128x64
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mark workspace safe for git
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build bread-compact-wifi-128x64
+        shell: bash
+        run: |
+          source $IDF_PATH/export.sh
+          LANG_CHOICE="${{ github.event.inputs.language }}"
+          if [ -z "$LANG_CHOICE" ]; then
+            LANG_CHOICE="en-US"
+          fi
+          echo "Building bread-compact-wifi-128x64 with language: $LANG_CHOICE"
+          python scripts/build.py bread-compact-wifi --name bread-compact-wifi-128x64 --language "$LANG_CHOICE" --zip
+
+      - name: Upload merged-binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-eyes-bread-compact-wifi-128x64
+          path: build/merged-binary.bin
+          if-no-files-found: error
+
+      - name: Upload release zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-eyes-release-zip
+          path: releases/*.zip
+          if-no-files-found: warn
