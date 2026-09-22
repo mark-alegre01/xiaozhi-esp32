@@ -24,6 +24,8 @@ private:
     lv_obj_t* eyes_container_ = nullptr;
     lv_obj_t* left_eye_ = nullptr;
     lv_obj_t* right_eye_ = nullptr;
+    lv_obj_t* left_pupil_ = nullptr;
+    lv_obj_t* right_pupil_ = nullptr;
     lv_timer_t* blink_timer_ = nullptr;
 
     void CreateRobotEyes(lv_obj_t* parent);

@@ -257,8 +257,9 @@ void OledDisplay::SetupUI_128x64() {
     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_radius(content_, 0, 0);
     lv_obj_set_style_pad_all(content_, 0, 0);
+    lv_obj_set_style_border_width(content_, 0, 0);
     lv_obj_set_width(content_, LV_HOR_RES);
-    lv_obj_set_flex_grow(content_, 1);
+    lv_obj_set_height(content_, 48);
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_flex_main_place(content_, LV_FLEX_ALIGN_CENTER, 0);
 
@@ -390,30 +391,50 @@ void OledDisplay::SetupUI_128x32() {
 
 void OledDisplay::CreateRobotEyes(lv_obj_t* parent) {
     eyes_container_ = lv_obj_create(parent);
-    lv_obj_set_size(eyes_container_, LV_HOR_RES, 44);
+    lv_obj_set_size(eyes_container_, LV_HOR_RES, 48);
     lv_obj_set_style_bg_opa(eyes_container_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(eyes_container_, 0, 0);
     lv_obj_set_style_pad_all(eyes_container_, 0, 0);
     lv_obj_set_scrollbar_mode(eyes_container_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_align(eyes_container_, LV_ALIGN_CENTER, 0, 0);
 
-    // Left Eye (Cozmo / Wall-E rounded rectangle)
+    // Left Eye (outer lit white rounded rectangle)
     left_eye_ = lv_obj_create(eyes_container_);
-    lv_obj_set_size(left_eye_, 30, 38);
-    lv_obj_set_style_bg_color(left_eye_, lv_color_white(), 0);
+    lv_obj_set_size(left_eye_, 32, 38);
+    lv_obj_set_style_bg_color(left_eye_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(left_eye_, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(left_eye_, 10, 0);
     lv_obj_set_style_border_width(left_eye_, 0, 0);
+    lv_obj_set_style_pad_all(left_eye_, 0, 0);
     lv_obj_align(left_eye_, LV_ALIGN_CENTER, -24, 0);
 
-    // Right Eye
+    // Left Pupil (dark center inside white eye)
+    left_pupil_ = lv_obj_create(left_eye_);
+    lv_obj_set_size(left_pupil_, 14, 18);
+    lv_obj_set_style_bg_color(left_pupil_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(left_pupil_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(left_pupil_, 4, 0);
+    lv_obj_set_style_border_width(left_pupil_, 0, 0);
+    lv_obj_center(left_pupil_);
+
+    // Right Eye (outer lit white rounded rectangle)
     right_eye_ = lv_obj_create(eyes_container_);
-    lv_obj_set_size(right_eye_, 30, 38);
-    lv_obj_set_style_bg_color(right_eye_, lv_color_white(), 0);
+    lv_obj_set_size(right_eye_, 32, 38);
+    lv_obj_set_style_bg_color(right_eye_, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(right_eye_, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(right_eye_, 10, 0);
     lv_obj_set_style_border_width(right_eye_, 0, 0);
+    lv_obj_set_style_pad_all(right_eye_, 0, 0);
     lv_obj_align(right_eye_, LV_ALIGN_CENTER, 24, 0);
+
+    // Right Pupil (dark center inside white eye)
+    right_pupil_ = lv_obj_create(right_eye_);
+    lv_obj_set_size(right_pupil_, 14, 18);
+    lv_obj_set_style_bg_color(right_pupil_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(right_pupil_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(right_pupil_, 4, 0);
+    lv_obj_set_style_border_width(right_pupil_, 0, 0);
+    lv_obj_center(right_pupil_);
 
     // Periodic blinking animation every 3.5 seconds
     blink_timer_ = lv_timer_create(BlinkTimerCallback, 3500, this);
@@ -423,9 +444,11 @@ void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
     auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->left_eye_ || !self->right_eye_) return;
 
-    // Fast blink: collapse eye height to 2px
+    // Fast blink: collapse eye height to 2px, hide pupils
     lv_obj_set_height(self->left_eye_, 2);
     lv_obj_set_height(self->right_eye_, 2);
+    if (self->left_pupil_) lv_obj_add_flag(self->left_pupil_, LV_OBJ_FLAG_HIDDEN);
+    if (self->right_pupil_) lv_obj_add_flag(self->right_pupil_, LV_OBJ_FLAG_HIDDEN);
 
     // Reopen eyes after 120ms
     lv_timer_create([](lv_timer_t* t) {
@@ -433,6 +456,8 @@ void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
         if (self && self->left_eye_ && self->right_eye_) {
             lv_obj_set_height(self->left_eye_, 38);
             lv_obj_set_height(self->right_eye_, 38);
+            if (self->left_pupil_) lv_obj_remove_flag(self->left_pupil_, LV_OBJ_FLAG_HIDDEN);
+            if (self->right_pupil_) lv_obj_remove_flag(self->right_pupil_, LV_OBJ_FLAG_HIDDEN);
         }
         lv_timer_del(t);
     }, 120, self);
@@ -454,6 +479,8 @@ void OledDisplay::SetEmotion(const char* emotion) {
         lv_obj_set_style_radius(right_eye_, 9, 0);
         lv_obj_align(left_eye_, LV_ALIGN_CENTER, -24, 4);
         lv_obj_align(right_eye_, LV_ALIGN_CENTER, 24, 4);
+        if (left_pupil_) lv_obj_add_flag(left_pupil_, LV_OBJ_FLAG_HIDDEN);
+        if (right_pupil_) lv_obj_add_flag(right_pupil_, LV_OBJ_FLAG_HIDDEN);
     } 
     else if (emo == "listening") {
         // Alert wide eyes (listening to user's voice)
@@ -463,24 +490,54 @@ void OledDisplay::SetEmotion(const char* emotion) {
         lv_obj_set_style_radius(right_eye_, 12, 0);
         lv_obj_align(left_eye_, LV_ALIGN_CENTER, -24, 0);
         lv_obj_align(right_eye_, LV_ALIGN_CENTER, 24, 0);
+        if (left_pupil_) {
+            lv_obj_remove_flag(left_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(left_pupil_, 16, 22);
+            lv_obj_center(left_pupil_);
+        }
+        if (right_pupil_) {
+            lv_obj_remove_flag(right_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(right_pupil_, 16, 22);
+            lv_obj_center(right_pupil_);
+        }
     } 
     else if (emo == "thinking") {
         // Looking up and to the side (thinking / LLM generating)
-        lv_obj_set_size(left_eye_, 28, 34);
-        lv_obj_set_size(right_eye_, 28, 34);
+        lv_obj_set_size(left_eye_, 30, 36);
+        lv_obj_set_size(right_eye_, 30, 36);
         lv_obj_set_style_radius(left_eye_, 10, 0);
         lv_obj_set_style_radius(right_eye_, 10, 0);
-        lv_obj_align(left_eye_, LV_ALIGN_CENTER, -18, -6);
-        lv_obj_align(right_eye_, LV_ALIGN_CENTER, 30, -6);
+        lv_obj_align(left_eye_, LV_ALIGN_CENTER, -18, -4);
+        lv_obj_align(right_eye_, LV_ALIGN_CENTER, 30, -4);
+        if (left_pupil_) {
+            lv_obj_remove_flag(left_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(left_pupil_, 12, 16);
+            lv_obj_align(left_pupil_, LV_ALIGN_TOP_RIGHT, -3, 3);
+        }
+        if (right_pupil_) {
+            lv_obj_remove_flag(right_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(right_pupil_, 12, 16);
+            lv_obj_align(right_pupil_, LV_ALIGN_TOP_RIGHT, -3, 3);
+        }
     } 
     else if (emo == "speaking") {
         // Dynamic speaking eyes (slightly taller and bouncing)
-        lv_obj_set_size(left_eye_, 32, 38);
-        lv_obj_set_size(right_eye_, 32, 38);
+        lv_obj_set_size(left_eye_, 32, 40);
+        lv_obj_set_size(right_eye_, 32, 40);
         lv_obj_set_style_radius(left_eye_, 11, 0);
         lv_obj_set_style_radius(right_eye_, 11, 0);
         lv_obj_align(left_eye_, LV_ALIGN_CENTER, -24, 0);
         lv_obj_align(right_eye_, LV_ALIGN_CENTER, 24, 0);
+        if (left_pupil_) {
+            lv_obj_remove_flag(left_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(left_pupil_, 14, 18);
+            lv_obj_center(left_pupil_);
+        }
+        if (right_pupil_) {
+            lv_obj_remove_flag(right_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(right_pupil_, 14, 18);
+            lv_obj_center(right_pupil_);
+        }
     } 
     else if (emo == "sad" || emo == "crying") {
         // Drooping sad eyes
@@ -490,15 +547,35 @@ void OledDisplay::SetEmotion(const char* emotion) {
         lv_obj_set_style_radius(right_eye_, 8, 0);
         lv_obj_align(left_eye_, LV_ALIGN_CENTER, -24, 5);
         lv_obj_align(right_eye_, LV_ALIGN_CENTER, 24, 5);
+        if (left_pupil_) {
+            lv_obj_remove_flag(left_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(left_pupil_, 10, 12);
+            lv_obj_align(left_pupil_, LV_ALIGN_BOTTOM_MID, 0, -2);
+        }
+        if (right_pupil_) {
+            lv_obj_remove_flag(right_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(right_pupil_, 10, 12);
+            lv_obj_align(right_pupil_, LV_ALIGN_BOTTOM_MID, 0, -2);
+        }
     }
     else {
         // Neutral / default open eyes
-        lv_obj_set_size(left_eye_, 30, 38);
-        lv_obj_set_size(right_eye_, 30, 38);
+        lv_obj_set_size(left_eye_, 32, 38);
+        lv_obj_set_size(right_eye_, 32, 38);
         lv_obj_set_style_radius(left_eye_, 10, 0);
         lv_obj_set_style_radius(right_eye_, 10, 0);
         lv_obj_align(left_eye_, LV_ALIGN_CENTER, -24, 0);
         lv_obj_align(right_eye_, LV_ALIGN_CENTER, 24, 0);
+        if (left_pupil_) {
+            lv_obj_remove_flag(left_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(left_pupil_, 14, 18);
+            lv_obj_center(left_pupil_);
+        }
+        if (right_pupil_) {
+            lv_obj_remove_flag(right_pupil_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_size(right_pupil_, 14, 18);
+            lv_obj_center(right_pupil_);
+        }
     }
 }
 
