@@ -420,7 +420,7 @@ void OledDisplay::CreateRobotEyes(lv_obj_t* parent) {
 }
 
 void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
-    auto self = static_cast<OledDisplay*>(timer->user_data);
+    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->left_eye_ || !self->right_eye_) return;
 
     // Fast blink: collapse eye height to 2px
@@ -429,7 +429,7 @@ void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
 
     // Reopen eyes after 120ms
     lv_timer_create([](lv_timer_t* t) {
-        auto self = static_cast<OledDisplay*>(t->user_data);
+        auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(t));
         if (self && self->left_eye_ && self->right_eye_) {
             lv_obj_set_height(self->left_eye_, 38);
             lv_obj_set_height(self->right_eye_, 38);
