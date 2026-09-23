@@ -80,10 +80,48 @@ void RadioPlayer::TaskTrampoline(void* arg) {
     self->WorkerTask();
 }
 
-bool RadioPlayer::Play(const std::string& url, const std::string& station_name) {
-    if (url.empty()) {
-        ESP_LOGE(TAG, "Cannot play empty stream URL");
+bool RadioPlayer::Play(const std::string& input_url, const std::string& station_name) {
+    if (input_url.empty() && station_name.empty()) {
+        ESP_LOGE(TAG, "Cannot play empty stream URL and station name");
         return false;
+    }
+
+    std::string resolved_url = input_url;
+    std::string resolved_name = station_name.empty() ? "Radio" : station_name;
+
+    std::string lower_input = input_url;
+    std::transform(lower_input.begin(), lower_input.end(), lower_input.begin(), ::tolower);
+    std::string lower_name = station_name;
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+
+    // Smart remap for dead URLs or station name inputs to verified live broadcasts
+    if (lower_input.find("loveradio") != std::string::npos || lower_name.find("love radio") != std::string::npos || lower_name.find("dzmb") != std::string::npos) {
+        resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
+        resolved_name = "Love Radio 90.7";
+    } else if (lower_input.find("yesfm") != std::string::npos || lower_name.find("yes") != std::string::npos) {
+        resolved_url = "https://azura.yesfm.com.ph/listen/yes_fm_manila/radio.mp3";
+        resolved_name = "Yes The Best 101.1";
+    } else if (lower_input.find("easyrock") != std::string::npos || lower_input.find("dwrk") != std::string::npos || lower_name.find("easy rock") != std::string::npos) {
+        resolved_url = "https://azura.easyrock.com.ph/listen/easy_rock_manila/radio.mp3";
+        resolved_name = "Easy Rock 96.3";
+    } else if (lower_input.find("barangay") != std::string::npos || lower_name.find("barangay") != std::string::npos) {
+        resolved_url = "http://28093.live.streamtheworld.com:3690/MORFM_S01AAC_SC";
+        resolved_name = "Barangay LS 97.1";
+    } else if (lower_input.find("mor1019") != std::string::npos || lower_name.find("mor") != std::string::npos) {
+        resolved_url = "https://playerservices.streamtheworld.com/api/livestream-redirect/MORFM_S01.mp3";
+        resolved_name = "MOR 101.9";
+    } else if (lower_input.find("dzrh") != std::string::npos || lower_name.find("dzrh") != std::string::npos) {
+        resolved_url = "https://azura.dzrh.com.ph/listen/dzrh_manila/radio.mp3";
+        resolved_name = "DZRH News";
+    } else if (lower_input.find("star") != std::string::npos || lower_name.find("star") != std::string::npos) {
+        resolved_url = "https://stream-13.zeno.fm/g1pmt17nz9duv";
+        resolved_name = "Star FM Manila";
+    } else if (lower_input.find("wish1075") != std::string::npos || lower_name.find("wish") != std::string::npos) {
+        resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
+        resolved_name = "Love Radio Manila";
+    } else if (resolved_url.empty() || (resolved_url.find("http://") != 0 && resolved_url.find("https://") != 0)) {
+        resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
+        resolved_name = "Love Radio 90.7";
     }
 
     // Stop current stream if running
@@ -91,8 +129,8 @@ bool RadioPlayer::Play(const std::string& url, const std::string& station_name) 
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        url_ = url;
-        station_name_ = station_name.empty() ? "Radio" : station_name;
+        url_ = resolved_url;
+        station_name_ = resolved_name;
         stop_requested_.store(false);
     }
 
@@ -168,6 +206,9 @@ void RadioPlayer::WorkerTask() {
 
     ESP_LOGI(TAG, "Connecting to stream: %s", stream_url.c_str());
 
+    // Switch WiFi to high performance mode for continuous stream throughput
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     auto display = Board::GetInstance().GetDisplay();
     if (display) {
         display->ShowNotification("Connecting...", 3000);
@@ -177,6 +218,7 @@ void RadioPlayer::WorkerTask() {
     if (!http) {
         ESP_LOGE(TAG, "Failed to create HTTP client");
         if (display) display->ShowNotification("Network Error", 3000);
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             is_playing_.store(false);
@@ -195,6 +237,7 @@ void RadioPlayer::WorkerTask() {
         ESP_LOGE(TAG, "HTTP open failed for %s: %s", stream_url.c_str(), opened.error().ToString().c_str());
         if (display) display->ShowNotification("Connect Failed", 3000);
         http->Close();
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             is_playing_.store(false);
@@ -209,6 +252,7 @@ void RadioPlayer::WorkerTask() {
         ESP_LOGE(TAG, "HTTP stream error, status: %d", status_code ? *status_code : -1);
         if (display) display->ShowNotification("Stream Offline", 3000);
         http->Close();
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             is_playing_.store(false);
@@ -223,7 +267,7 @@ void RadioPlayer::WorkerTask() {
     std::string lower_url = stream_url;
     std::transform(lower_url.begin(), lower_url.end(), lower_url.begin(), ::tolower);
     if (lower_url.find(".mp3") != std::string::npos || lower_url.find("format=mp3") != std::string::npos ||
-        lower_url.find("/mp3") != std::string::npos) {
+        lower_url.find("/mp3") != std::string::npos || lower_url.find("type=mp3") != std::string::npos) {
         is_mp3 = true;
     }
 
@@ -258,6 +302,7 @@ void RadioPlayer::WorkerTask() {
         ESP_LOGE(TAG, "Failed to open simple decoder: %d", dec_err);
         if (display) display->ShowNotification("Decode Error", 3000);
         http->Close();
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             is_playing_.store(false);
@@ -283,16 +328,24 @@ void RadioPlayer::WorkerTask() {
     int target_sample_rate = codec_ ? codec_->output_sample_rate() : 24000;
 
     if (codec_ != nullptr) {
+        // Lock prevents AudioService power-save timer from disabling
+        // the I2S TX channel while we are actively streaming audio.
+        codec_->LockOutput();
         codec_->EnableOutput(true);
     }
 
     ESP_LOGI(TAG, "Streaming audio (target rate %d Hz)...", target_sample_rate);
 
     while (!stop_requested_.load()) {
-        // Stop radio if device starts listening or speaking with user
         auto dev_state = Application::GetInstance().GetDeviceState();
-        if (dev_state == kDeviceStateListening || dev_state == kDeviceStateSpeaking) {
-            ESP_LOGI(TAG, "Device state changed (%d), exiting radio stream", (int)dev_state);
+        // If Xiaozhi is speaking its initial confirmation to the user, wait until it finishes
+        if (dev_state == kDeviceStateSpeaking) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        // If user triggers listening mode to speak a new command, stop radio stream
+        if (dev_state == kDeviceStateListening) {
+            ESP_LOGI(TAG, "User started speaking, stopping radio");
             break;
         }
 
@@ -306,6 +359,20 @@ void RadioPlayer::WorkerTask() {
             break;
         }
 
+        // Auto-detect MP3 from magic bytes if not detected by URL
+        if (!is_mp3 && *read_res >= 3) {
+            if ((http_buf[0] == 'I' && http_buf[1] == 'D' && http_buf[2] == '3') ||
+                (http_buf[0] == 0xFF && (http_buf[1] == 0xFB || http_buf[1] == 0xF3 || http_buf[1] == 0xF2))) {
+                ESP_LOGI(TAG, "Detected MP3 stream header, switching to MP3 decoder");
+                esp_audio_simple_dec_close(dec_handle);
+                dec_cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+                dec_cfg.dec_cfg = nullptr;
+                dec_cfg.cfg_size = 0;
+                esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                is_mp3 = true;
+            }
+        }
+
         esp_audio_simple_dec_raw_t raw = {
             .buffer = http_buf.data(),
             .len = static_cast<uint32_t>(*read_res),
@@ -316,7 +383,11 @@ void RadioPlayer::WorkerTask() {
 
         while (raw.len > 0 && !stop_requested_.load()) {
             auto current_dev_state = Application::GetInstance().GetDeviceState();
-            if (current_dev_state == kDeviceStateListening || current_dev_state == kDeviceStateSpeaking) {
+            if (current_dev_state == kDeviceStateSpeaking) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            if (current_dev_state == kDeviceStateListening) {
                 break;
             }
 
@@ -402,9 +473,16 @@ void RadioPlayer::WorkerTask() {
     }
     http->Close();
 
-    if (codec_ != nullptr && codec_->output_enabled()) {
-        codec_->EnableOutput(false);
+    if (codec_ != nullptr) {
+        // Release the output lock so AudioService can manage idle power.
+        codec_->UnlockOutput();
+        if (codec_->output_enabled()) {
+            codec_->EnableOutput(false);
+        }
     }
+
+    // Restore WiFi power save level
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
     if (display) {
         display->SetStatus("Ready");
@@ -427,13 +505,15 @@ std::string RadioPlayer::SearchStationsOnline(const std::string& query) {
         int bitrate;
     };
     static const StationPreset kPresets[] = {
-        {"Wish 107.5 FM", "https://playerservices.streamtheworld.com/api/livestream-redirect/WISH1075AAC.aac", "AAC", 64},
-        {"Barangay LS 97.1 FM", "https://playerservices.streamtheworld.com/api/livestream-redirect/BARANGAYLS971.aac", "AAC", 64},
-        {"Love Radio 90.7 FM", "https://playerservices.streamtheworld.com/api/livestream-redirect/LOVERADIO907.aac", "AAC", 64},
-        {"MOR 101.9 For Life", "https://playerservices.streamtheworld.com/api/livestream-redirect/MOR1019.aac", "AAC", 64},
-        {"Yes The Best 101.1 FM", "https://playerservices.streamtheworld.com/api/livestream-redirect/YESFM1011.aac", "AAC", 64},
-        {"Easy Rock 96.3 FM", "https://playerservices.streamtheworld.com/api/livestream-redirect/DWRKFM.aac", "AAC", 64},
-        {"Monster RX 93.1", "https://stream-179.zeno.fm/43n21x64g0hvv", "AAC", 64},
+        {"90.7 Love Radio Manila", "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3", "MP3", 128},
+        {"101.1 Yes The Best Manila", "https://azura.yesfm.com.ph/listen/yes_fm_manila/radio.mp3", "MP3", 128},
+        {"96.3 Easy Rock Manila", "https://azura.easyrock.com.ph/listen/easy_rock_manila/radio.mp3", "MP3", 128},
+        {"Star FM 102.7 Manila", "https://stream-13.zeno.fm/g1pmt17nz9duv", "AAC", 64},
+        {"Barangay LS 97.1 Manila", "http://28093.live.streamtheworld.com:3690/MORFM_S01AAC_SC", "AAC", 64},
+        {"MOR 101.9 FM", "https://playerservices.streamtheworld.com/api/livestream-redirect/MORFM_S01.mp3", "MP3", 128},
+        {"DZRH News Manila", "https://azura.dzrh.com.ph/listen/dzrh_manila/radio.mp3", "MP3", 128},
+        {"91.5 Win Radio Manila", "https://stream-31.zeno.fm/2ss1hgnu6hhvv", "MP3", 128},
+        {"97.9 Home Radio Manila", "http://142.44.212.114:9071/stream", "AAC", 64},
     };
 
     std::string encoded_query;

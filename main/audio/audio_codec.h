@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <atomic>
 
 #include "board.h"
 
@@ -33,6 +34,13 @@ public:
     virtual void SetInputGain(float gain);
     virtual void EnableInput(bool enable);
     virtual void EnableOutput(bool enable);
+
+    // Lock output: while locked, EnableOutput(false) is a no-op.
+    // Used by RadioPlayer to prevent AudioService idle timer from
+    // disabling the I2S TX channel during continuous radio streaming.
+    void LockOutput()   { output_lock_count_.fetch_add(1); }
+    void UnlockOutput() { if (output_lock_count_.load() > 0) output_lock_count_.fetch_sub(1); }
+    bool IsOutputLocked() const { return output_lock_count_.load() > 0; }
 
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
@@ -63,6 +71,9 @@ protected:
     int output_channels_ = 1;
     int output_volume_ = 70;
     float input_gain_ = 0.0;
+
+private:
+    std::atomic<int> output_lock_count_{0};
 
     virtual int Read(int16_t* dest, int samples) = 0;
     virtual int Write(const int16_t* data, int samples) = 0;

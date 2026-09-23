@@ -273,6 +273,13 @@ void NoAudioCodec::EnableOutput(bool enable) {
     if (enable == output_enabled_) {
         return;
     }
+    // If the output is locked (e.g. by RadioPlayer), silently ignore
+    // disable requests so AudioService's idle power-save timer does not
+    // cut the I2S TX channel mid-stream.
+    if (!enable && IsOutputLocked()) {
+        ESP_LOGW("NoAudioCodec", "EnableOutput(false) ignored: output is locked by radio player");
+        return;
+    }
     if (enable) {
         ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     } else {
