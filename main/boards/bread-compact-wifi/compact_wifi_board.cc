@@ -9,6 +9,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
+#include "radio_player.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -107,9 +108,13 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
+            if (RadioPlayer::GetInstance().IsPlaying()) {
+                RadioPlayer::GetInstance().Stop();
+            }
             app.ToggleChatState();
         });
         touch_button_.OnPressDown([this]() {
+            RadioPlayer::GetInstance().Stop();
             Application::GetInstance().StartListening();
         });
         touch_button_.OnPressUp([this]() {
@@ -150,6 +155,68 @@ private:
     // 物联网初始化，逐步迁移到 MCP 协议
     void InitializeTools() {
         static LampController lamp(LAMP_GPIO);
+
+        auto& mcp = McpServer::GetInstance();
+
+        mcp.AddTool(
+            "self.radio.play",
+            "Play a Philippine internet radio station, OPM music stream, or any audio stream URL through the speaker. "
+            "Call this tool when the user asks to play a radio station, listen to Filipino music, or stream audio.",
+            PropertyList({
+                Property("url", kPropertyTypeString),
+                Property("name", kPropertyTypeString, std::string("Radio"))
+            }),
+            [](const PropertyList& props) -> ToolResult {
+                auto url = props["url"].value<std::string>();
+                auto name = props["name"].value<std::string>();
+                if (url.empty()) {
+                    return std::unexpected("Stream URL cannot be empty");
+                }
+                bool ok = RadioPlayer::GetInstance().Play(url, name);
+                if (!ok) {
+                    return std::unexpected("Failed to start radio playback");
+                }
+                return "Now playing " + name;
+            });
+
+        mcp.AddTool(
+            "self.radio.stop",
+            "Stop the currently playing internet radio or audio stream.",
+            PropertyList(),
+            [](const PropertyList& props) -> ToolResult {
+                RadioPlayer::GetInstance().Stop();
+                return true;
+            });
+
+        mcp.AddTool(
+            "self.radio.search_stations",
+            "Search online for Philippine radio stations and OPM stream URLs. "
+            "Returns a JSON list of available stations with names, URLs, and audio formats. "
+            "Call this tool when the user asks what radio stations are available or wants to find a station.",
+            PropertyList({
+                Property("query", kPropertyTypeString, std::string("Philippines"))
+            }),
+            [](const PropertyList& props) -> ToolResult {
+                auto query = props["query"].value<std::string>();
+                return RadioPlayer::SearchStationsOnline(query);
+            });
+
+        mcp.AddTool(
+            "self.radio.get_status",
+            "Get the current status of radio playback (is_playing, current station, current URL).",
+            PropertyList(),
+            [](const PropertyList& props) -> ToolResult {
+                auto& player = RadioPlayer::GetInstance();
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "is_playing", player.IsPlaying());
+                cJSON_AddStringToObject(root, "station", player.GetCurrentStation().c_str());
+                cJSON_AddStringToObject(root, "url", player.GetCurrentUrl().c_str());
+                char* str = cJSON_PrintUnformatted(root);
+                std::string res(str ? str : "{}");
+                if (str) free(str);
+                cJSON_Delete(root);
+                return res;
+            });
     }
 
 public:
