@@ -11,6 +11,7 @@
 #include "audio_codec.h"
 #include "display/display.h"
 #include "application.h"
+#include "config.h"
 
 #if __has_include("simple_dec/esp_audio_simple_dec.h")
 #include "simple_dec/esp_audio_simple_dec.h"
@@ -334,21 +335,43 @@ void RadioPlayer::WorkerTask() {
         codec_->EnableOutput(true);
     }
 
-    ESP_LOGI(TAG, "Streaming audio (target rate %d Hz)...", target_sample_rate);
+    // ─── Streaming loop ───────────────────────────────────────────────────────
+    //
+    // Root cause of "no audio" bug: the old code broke out of the inner decode
+    // loop when consumed==0 (decoder needs more data), then the outer loop read
+    // a FRESH http_buf, discarding the partial frame still in the buffer.
+    // Fix: use an accumulating buffer (acc_buf) so undecoded bytes are kept
+    // across HTTP reads.  The decoder is called repeatedly until it needs more
+    // data, then we append the next HTTP chunk and try again.
+    //
+    // Additional robustness:
+    //  - Skip 1 byte on hard errors (re-sync after corrupt frames)
+    //  - Auto-switch MP3→AAC decoder if MP3 fails too many times in a row
+    //  - Log frame count every 50 frames so you can verify audio is flowing
+    // ──────────────────────────────────────────────────────────────────────────
+
+    std::vector<uint8_t> acc_buf;           // persistent decode input buffer
+    acc_buf.reserve(kHttpReadBufSize * 4);  // start at 8 KB
+
+    int frames_decoded   = 0;
+    int consec_errors    = 0;
+    bool mp3_fallback_tried = false;
+    constexpr int kMaxConsecErrors = 64;      // switch/abort after 64 bad bytes
+    constexpr size_t kMaxAccBuf   = 128 * 1024; // 128 KB cap (≈3 s of MP3 @ 128k)
 
     while (!stop_requested_.load()) {
+        // ── Device-state gate ────────────────────────────────────────────────
         auto dev_state = Application::GetInstance().GetDeviceState();
-        // If Xiaozhi is speaking its initial confirmation to the user, wait until it finishes
         if (dev_state == kDeviceStateSpeaking) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-        // If user triggers listening mode to speak a new command, stop radio stream
         if (dev_state == kDeviceStateListening) {
             ESP_LOGI(TAG, "User started speaking, stopping radio");
             break;
         }
 
+        // ── Read the next HTTP chunk and append to the accumulator ───────────
         auto read_res = http->Read(reinterpret_cast<char*>(http_buf.data()), http_buf.size());
         if (!read_res) {
             ESP_LOGW(TAG, "Stream read failed: %s", read_res.error().ToString().c_str());
@@ -359,74 +382,159 @@ void RadioPlayer::WorkerTask() {
             break;
         }
 
-        // Auto-detect MP3 from magic bytes if not detected by URL
-        if (!is_mp3 && *read_res >= 3) {
-            if ((http_buf[0] == 'I' && http_buf[1] == 'D' && http_buf[2] == '3') ||
-                (http_buf[0] == 0xFF && (http_buf[1] == 0xFB || http_buf[1] == 0xF3 || http_buf[1] == 0xF2))) {
-                ESP_LOGI(TAG, "Detected MP3 stream header, switching to MP3 decoder");
+        // Auto-detect codec from the FIRST real chunk when URL was ambiguous
+        if (frames_decoded == 0 && acc_buf.empty() && *read_res >= 3) {
+            uint8_t b0 = http_buf[0], b1 = http_buf[1], b2 = http_buf[2];
+            bool looks_mp3 = (b0 == 'I' && b1 == 'D' && b2 == '3') ||   // ID3 tag
+                             (b0 == 0xFF && (b1 & 0xE0) == 0xE0);        // MPEG sync
+            bool looks_aac = (b0 == 0xFF && (b1 & 0xF6) == 0xF0);        // ADTS sync
+
+            if (!is_mp3 && looks_mp3) {
+                ESP_LOGI(TAG, "Detected MP3 from magic bytes, switching decoder");
                 esp_audio_simple_dec_close(dec_handle);
                 dec_cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
-                dec_cfg.dec_cfg = nullptr;
+                dec_cfg.dec_cfg  = nullptr;
                 dec_cfg.cfg_size = 0;
                 esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
                 is_mp3 = true;
+            } else if (is_mp3 && looks_aac) {
+                ESP_LOGI(TAG, "Detected AAC from magic bytes, switching decoder");
+                esp_audio_simple_dec_close(dec_handle);
+                dec_cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+#if __has_include("esp_aac_dec.h")
+                esp_aac_dec_cfg_t aac_fb = {};
+                aac_fb.aac_plus_enable = true;
+                dec_cfg.dec_cfg  = &aac_fb;
+                dec_cfg.cfg_size = sizeof(esp_aac_dec_cfg_t);
+#else
+                dec_cfg.dec_cfg  = nullptr;
+                dec_cfg.cfg_size = 0;
+#endif
+                esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                is_mp3 = false;
             }
         }
 
-        esp_audio_simple_dec_raw_t raw = {
-            .buffer = http_buf.data(),
-            .len = static_cast<uint32_t>(*read_res),
-            .eos = false,
-            .consumed = 0,
-            .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
-        };
+        acc_buf.insert(acc_buf.end(),
+                       http_buf.begin(),
+                       http_buf.begin() + *read_res);
 
-        while (raw.len > 0 && !stop_requested_.load()) {
-            auto current_dev_state = Application::GetInstance().GetDeviceState();
-            if (current_dev_state == kDeviceStateSpeaking) {
+        // Trim accumulator if it grows too large (stream stall / decoder stuck)
+        if (acc_buf.size() > kMaxAccBuf) {
+            ESP_LOGW(TAG, "Acc buffer (%u B) too large, trimming", (unsigned)acc_buf.size());
+            acc_buf.erase(acc_buf.begin(),
+                          acc_buf.begin() + (acc_buf.size() - kMaxAccBuf / 2));
+        }
+
+        // ── Inner decode loop: drain acc_buf as much as possible ─────────────
+        size_t pos = 0;   // read position inside acc_buf
+        while (pos < acc_buf.size() && !stop_requested_.load()) {
+            // Device-state re-check inside inner loop
+            auto cur_state = Application::GetInstance().GetDeviceState();
+            if (cur_state == kDeviceStateSpeaking) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
-            if (current_dev_state == kDeviceStateListening) {
+            if (cur_state == kDeviceStateListening) {
+                ESP_LOGI(TAG, "Listening gate hit inside decode loop");
+                stop_requested_.store(true);
                 break;
             }
 
-            esp_audio_simple_dec_out_t out_frame = {
-                .buffer = pcm_buf.data(),
-                .len = static_cast<uint32_t>(pcm_buf.size()),
-                .decoded_size = 0,
-            };
+            esp_audio_simple_dec_raw_t raw = {};
+            raw.buffer       = acc_buf.data() + pos;
+            raw.len          = static_cast<uint32_t>(acc_buf.size() - pos);
+            raw.eos          = false;
+            raw.consumed     = 0;
+            raw.frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE;
+
+            esp_audio_simple_dec_out_t out_frame = {};
+            out_frame.buffer       = pcm_buf.data();
+            out_frame.len          = static_cast<uint32_t>(pcm_buf.size());
+            out_frame.decoded_size = 0;
 
             esp_audio_err_t ret = esp_audio_simple_dec_process(dec_handle, &raw, &out_frame);
+
+            // Output buffer too small — double it and retry
             if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
                 pcm_buf.resize(pcm_buf.size() * 2);
+                ESP_LOGD(TAG, "PCM buf expanded to %u B", (unsigned)pcm_buf.size());
                 continue;
             }
-            if (ret != ESP_AUDIO_ERR_OK && ret != ESP_AUDIO_ERR_CONTINUE) {
+
+            if (raw.consumed > 0) {
+                // Decoder made progress
+                pos += raw.consumed;
+                consec_errors = 0;
+            } else if (ret != ESP_AUDIO_ERR_OK && ret != ESP_AUDIO_ERR_CONTINUE) {
+                // Hard error AND no progress: skip one byte to re-sync
+                ESP_LOGD(TAG, "Dec err %d at pos %u, skipping byte", ret, (unsigned)pos);
+                pos++;
+                consec_errors++;
+                if (consec_errors >= kMaxConsecErrors) {
+                    if (is_mp3 && !mp3_fallback_tried) {
+                        ESP_LOGW(TAG, "MP3 decoder failing (%d errors), trying AAC fallback", consec_errors);
+                        esp_audio_simple_dec_close(dec_handle);
+                        dec_cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+#if __has_include("esp_aac_dec.h")
+                        esp_aac_dec_cfg_t aac_fb = {};
+                        aac_fb.aac_plus_enable = true;
+                        dec_cfg.dec_cfg  = &aac_fb;
+                        dec_cfg.cfg_size = sizeof(esp_aac_dec_cfg_t);
+#else
+                        dec_cfg.dec_cfg  = nullptr;
+                        dec_cfg.cfg_size = 0;
+#endif
+                        esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                        is_mp3 = false;
+                        mp3_fallback_tried = true;
+                        consec_errors = 0;
+                        pos = 0;         // retry from beginning of buffer
+                        acc_buf.clear(); // flush stale data and re-fill
+                        break;
+                    }
+                    ESP_LOGE(TAG, "Too many consecutive decode errors, aborting stream");
+                    stop_requested_.store(true);
+                    break;
+                }
+            } else {
+                // consumed==0 but ret==OK/CONTINUE: need more data
+                // Break inner loop; outer loop will read more HTTP bytes and append
+                ESP_LOGD(TAG, "Decoder needs more data (pos=%u acc=%u)", (unsigned)pos, (unsigned)acc_buf.size());
                 break;
             }
 
+            // ── Output decoded PCM ────────────────────────────────────────────
             if (out_frame.decoded_size > 0 && codec_ != nullptr) {
+                frames_decoded++;
+
                 esp_audio_simple_dec_info_t info = {};
                 esp_audio_simple_dec_get_info(dec_handle, &info);
 
-                // Stereo to mono downmixing
+                // Log stream info on first frame and every 50 frames
+                if (frames_decoded == 1 || frames_decoded % 50 == 0) {
+                    ESP_LOGI(TAG, "Frame #%d: ch=%d sr=%d Hz, decoded=%u B",
+                             frames_decoded, info.channel, info.sample_rate,
+                             (unsigned)out_frame.decoded_size);
+                }
+
+                // Stereo → mono downmix
                 std::vector<int16_t> mono_pcm;
-                if (info.channel == 2) {
-                    size_t samples = out_frame.decoded_size / (sizeof(int16_t) * 2);
+                if (info.channel >= 2) {
+                    size_t n = out_frame.decoded_size / (sizeof(int16_t) * 2);
                     int16_t* src = reinterpret_cast<int16_t*>(out_frame.buffer);
-                    mono_pcm.resize(samples);
-                    for (size_t i = 0; i < samples; i++) {
+                    mono_pcm.resize(n);
+                    for (size_t i = 0; i < n; i++) {
                         mono_pcm[i] = static_cast<int16_t>(
                             (static_cast<int32_t>(src[i * 2]) + src[i * 2 + 1]) / 2);
                     }
                 } else {
-                    size_t samples = out_frame.decoded_size / sizeof(int16_t);
+                    size_t n = out_frame.decoded_size / sizeof(int16_t);
                     int16_t* src = reinterpret_cast<int16_t*>(out_frame.buffer);
-                    mono_pcm.assign(src, src + samples);
+                    mono_pcm.assign(src, src + n);
                 }
 
-                // Sample rate conversion
+                // Sample-rate conversion (create/update resampler as needed)
                 if (info.sample_rate > 0 && info.sample_rate != current_sample_rate) {
                     if (resampler != nullptr) {
                         esp_ae_rate_cvt_close(resampler);
@@ -436,33 +544,39 @@ void RadioPlayer::WorkerTask() {
                     if (current_sample_rate != target_sample_rate) {
                         esp_ae_rate_cvt_cfg_t cvt_cfg =
                             RATE_CVT_CFG(current_sample_rate, target_sample_rate, ESP_AUDIO_MONO);
-                        esp_ae_rate_cvt_open(&cvt_cfg, &resampler);
+                        auto rc = esp_ae_rate_cvt_open(&cvt_cfg, &resampler);
+                        ESP_LOGI(TAG, "Resampler %d→%d Hz rc=%d", current_sample_rate, target_sample_rate, rc);
                     }
                 }
 
                 if (resampler != nullptr) {
                     uint32_t max_out = 0;
                     esp_ae_rate_cvt_get_max_out_sample_num(resampler, mono_pcm.size(), &max_out);
-                    std::vector<int16_t> resampled(max_out);
-                    uint32_t actual_out = max_out;
-                    esp_ae_rate_cvt_process(resampler, (esp_ae_sample_t)mono_pcm.data(), mono_pcm.size(),
-                                            (esp_ae_sample_t)resampled.data(), &actual_out);
-                    resampled.resize(actual_out);
-                    codec_->OutputData(resampled);
+                    if (max_out > 0) {
+                        std::vector<int16_t> resampled(max_out);
+                        uint32_t actual_out = max_out;
+                        esp_ae_rate_cvt_process(resampler,
+                            reinterpret_cast<esp_ae_sample_t>(mono_pcm.data()), mono_pcm.size(),
+                            reinterpret_cast<esp_ae_sample_t>(resampled.data()), &actual_out);
+                        resampled.resize(actual_out);
+                        if (!resampled.empty()) codec_->OutputData(resampled);
+                    }
                 } else {
-                    codec_->OutputData(mono_pcm);
+                    if (!mono_pcm.empty()) codec_->OutputData(mono_pcm);
                 }
             }
+        } // inner decode loop
 
-            if (raw.consumed > 0 && raw.consumed <= raw.len) {
-                raw.buffer += raw.consumed;
-                raw.len -= raw.consumed;
-                raw.consumed = 0;
-            } else {
-                break;
-            }
+        // Remove consumed bytes from the accumulator (keep only the tail)
+        if (pos > 0 && pos <= acc_buf.size()) {
+            acc_buf.erase(acc_buf.begin(), acc_buf.begin() + pos);
+        } else if (pos > acc_buf.size()) {
+            acc_buf.clear();
         }
-    }
+    } // outer HTTP-read loop
+
+    ESP_LOGI(TAG, "Stream loop exited. Total frames decoded: %d", frames_decoded);
+
 
     // Cleanup resources
     if (resampler != nullptr) {
@@ -608,3 +722,86 @@ std::string RadioPlayer::SearchStationsOnline(const std::string& query) {
     cJSON_Delete(out_array);
     return result;
 }
+
+std::string RadioPlayer::PlaySongOrFallback(const std::string& query) {
+    if (query.empty()) {
+        Play("https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3", "Love Radio 90.7");
+        return "Playing Philippine OPM Live Radio";
+    }
+
+    ESP_LOGI(TAG, "Searching YouTube song for: '%s'", query.c_str());
+
+    std::string encoded_query;
+    for (char c : query) {
+        if (c == ' ') {
+            encoded_query += "%20";
+        } else if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') {
+            encoded_query += c;
+        } else {
+            char hex[4];
+            snprintf(hex, sizeof(hex), "%%%02X", static_cast<unsigned char>(c));
+            encoded_query += hex;
+        }
+    }
+
+    std::string bridge_host = MUSIC_BRIDGE_HOST;
+    int bridge_port = MUSIC_BRIDGE_PORT;
+    std::string search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->ShowNotification("Searching Song...", 2500);
+    }
+
+    bool bridge_success = false;
+    std::string stream_url;
+    std::string song_title = query;
+
+    auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+    if (http) {
+        http->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
+        http->SetHeader("Accept", "application/json");
+        http->SetTimeout(6000);
+
+        if (auto opened = http->Open("GET", search_url); opened) {
+            auto status = http->GetStatusCode();
+            if (status && *status >= 200 && *status < 300) {
+                std::string body;
+                char buf[512];
+                while (body.size() < 8192) {
+                    auto read_res = http->Read(buf, sizeof(buf) - 1);
+                    if (!read_res || *read_res == 0) break;
+                    buf[*read_res] = '\0';
+                    body.append(buf, *read_res);
+                }
+                cJSON* root = cJSON_Parse(body.c_str());
+                if (root) {
+                    cJSON* status_item = cJSON_GetObjectItem(root, "status");
+                    cJSON* title_item = cJSON_GetObjectItem(root, "title");
+                    cJSON* url_item = cJSON_GetObjectItem(root, "stream_url");
+                    if (status_item && cJSON_IsString(status_item) && strcmp(status_item->valuestring, "ok") == 0 &&
+                        url_item && cJSON_IsString(url_item) && strlen(url_item->valuestring) > 0) {
+                        stream_url = url_item->valuestring;
+                        if (title_item && cJSON_IsString(title_item)) {
+                            song_title = title_item->valuestring;
+                        }
+                        bridge_success = true;
+                    }
+                    cJSON_Delete(root);
+                }
+            }
+        }
+        http->Close();
+    }
+
+    if (bridge_success && !stream_url.empty()) {
+        ESP_LOGI(TAG, "Playing song from bridge: %s (%s)", song_title.c_str(), stream_url.c_str());
+        Play(stream_url, song_title);
+        return "Now playing " + song_title + " from YouTube";
+    }
+
+    ESP_LOGW(TAG, "Music bridge unreachable or song not found. Falling back to live OPM radio.");
+    Play("https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3", "Love Radio 90.7 (OPM)");
+    return "Music bridge offline or not found. Playing live Philippine OPM radio: Love Radio 90.7";
+}
+

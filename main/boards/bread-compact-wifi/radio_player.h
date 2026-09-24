@@ -20,6 +20,7 @@ public:
     std::string GetCurrentUrl() const;
 
     static std::string SearchStationsOnline(const std::string& query);
+    std::string PlaySongOrFallback(const std::string& query);
 
 private:
     RadioPlayer();

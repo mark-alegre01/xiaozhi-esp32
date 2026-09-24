@@ -113,12 +113,25 @@ private:
             }
             app.ToggleChatState();
         });
-        touch_button_.OnPressDown([this]() {
-            RadioPlayer::GetInstance().Stop();
-            Application::GetInstance().StartListening();
+
+        // Touch button: tap/click to toggle chat mode; long-press to push-to-talk
+        touch_button_.OnClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
+            }
+            if (RadioPlayer::GetInstance().IsPlaying()) {
+                RadioPlayer::GetInstance().Stop();
+            }
+            app.ToggleChatState();
         });
-        touch_button_.OnPressUp([this]() {
-            Application::GetInstance().StopListening();
+
+        touch_button_.OnLongPress([this]() {
+            if (RadioPlayer::GetInstance().IsPlaying()) {
+                RadioPlayer::GetInstance().Stop();
+            }
+            Application::GetInstance().StartListening();
         });
 
         volume_up_button_.OnClick([this]() {
@@ -158,6 +171,31 @@ private:
 
         auto& mcp = McpServer::GetInstance();
 
+        // Dedicated YouTube / Online Song Player
+        mcp.AddTool(
+            "self.music.play_song",
+            "Search and play any specific song, music track, or artist (such as Philippine OPM music, pop, rock, Eraserheads, Ben&Ben, etc.) on YouTube or online. "
+            "Call this tool whenever the user asks to play a song, play music, or listen to an artist or track.",
+            PropertyList({
+                Property("query", kPropertyTypeString)
+            }),
+            [](const PropertyList& props) -> ToolResult {
+                auto query = props["query"].value<std::string>();
+                if (query.empty()) {
+                    return std::unexpected("Song query cannot be empty");
+                }
+                return RadioPlayer::GetInstance().PlaySongOrFallback(query);
+            });
+
+        mcp.AddTool(
+            "self.music.stop",
+            "Stop the currently playing music, song, or audio stream.",
+            PropertyList(),
+            [](const PropertyList& props) -> ToolResult {
+                RadioPlayer::GetInstance().Stop();
+                return true;
+            });
+
         mcp.AddTool(
             "self.radio.play",
             "Play a Philippine internet radio station, OPM music stream, or any audio stream URL through the speaker. "
@@ -169,9 +207,18 @@ private:
             [](const PropertyList& props) -> ToolResult {
                 auto url = props["url"].value<std::string>();
                 auto name = props["name"].value<std::string>();
-                if (url.empty()) {
-                    return std::unexpected("Stream URL cannot be empty");
+                if (url.empty() && name.empty()) {
+                    return std::unexpected("Stream URL or name cannot be empty");
                 }
+
+                // If URL does not look like a direct HTTP/HTTPS link, route to song search
+                if (!url.empty() && url.find("http://") != 0 && url.find("https://") != 0) {
+                    return RadioPlayer::GetInstance().PlaySongOrFallback(url);
+                }
+                if (url.empty() && !name.empty() && name != "Radio") {
+                    return RadioPlayer::GetInstance().PlaySongOrFallback(name);
+                }
+
                 bool ok = RadioPlayer::GetInstance().Play(url, name);
                 if (!ok) {
                     return std::unexpected("Failed to start radio playback");
@@ -222,7 +269,7 @@ private:
 public:
     CompactWifiBoard() :
         boot_button_(BOOT_BUTTON_GPIO),
-        touch_button_(TOUCH_BUTTON_GPIO),
+        touch_button_(TOUCH_BUTTON_GPIO, TOUCH_BUTTON_ACTIVE_HIGH),
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
         InitializeDisplayI2c();

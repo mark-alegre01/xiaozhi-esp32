@@ -31,6 +31,7 @@
 #define BUILTIN_LED_GPIO        GPIO_NUM_48
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 #define TOUCH_BUTTON_GPIO       GPIO_NUM_47
+#define TOUCH_BUTTON_ACTIVE_HIGH true
 #define VOLUME_UP_BUTTON_GPIO   GPIO_NUM_40
 #define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_39
 
@@ -52,6 +53,10 @@
 #define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y true
 
+
+// Music Bridge Configuration (PC running music_bridge.py for YouTube audio)
+#define MUSIC_BRIDGE_HOST "192.168.1.46"
+#define MUSIC_BRIDGE_PORT 8080
 
 // A MCP Test: Control a lamp
 #define LAMP_GPIO GPIO_NUM_18
