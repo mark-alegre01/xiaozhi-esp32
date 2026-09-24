@@ -21,6 +21,7 @@ public:
     std::string GetCurrentUrl() const;
 
     static std::string SearchStationsOnline(const std::string& query);
+    static std::string FetchNewsHeadlines(const std::string& category = "philippines");
     std::string PlaySongOrFallback(const std::string& query);
 
 private:

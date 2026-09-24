@@ -274,6 +274,50 @@ private:
                 cJSON_Delete(root);
                 return res;
             });
+
+        // ── News Tools: Spoken AI Summaries & Live News Radio ───────────────
+        mcp.AddTool(
+            "self.news.get_headlines",
+            "Get the latest top news headlines (e.g. Philippines news, world news, technology, business, or sports). "
+            "Use this tool whenever the user asks 'What is the news today?', 'Give me the latest headlines', or asks about current events. "
+            "Returns a list of current news stories so you can summarize and read them aloud to the user.",
+            PropertyList({
+                Property("category", kPropertyTypeString, std::string("philippines"))
+            }),
+            [](const PropertyList& props) -> ToolResult {
+                auto category = props["category"].value<std::string>();
+                return RadioPlayer::FetchNewsHeadlines(category);
+            });
+
+        mcp.AddTool(
+            "self.news.play_broadcast",
+            "Play a live 24/7 news radio broadcast or audio stream through the speaker. "
+            "Choose 'DZRH' (or 'philippines') for live Philippine news in Tagalog, or 'BBC' (or 'world') for BBC World Service in English. "
+            "Call this tool when the user asks to play news radio, listen to live news, or tune into a news station.",
+            PropertyList({
+                Property("station", kPropertyTypeString, std::string("DZRH"))
+            }),
+            [](const PropertyList& props) -> ToolResult {
+                auto station = props["station"].value<std::string>();
+                std::string lower_station = station;
+                std::transform(lower_station.begin(), lower_station.end(), lower_station.begin(), ::tolower);
+
+                std::string url;
+                std::string name;
+                if (lower_station.find("bbc") != std::string::npos || lower_station.find("world") != std::string::npos || lower_station.find("english") != std::string::npos) {
+                    url = "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service";
+                    name = "BBC World Service";
+                } else {
+                    url = "https://azura.dzrh.com.ph/listen/dzrh_manila/radio.mp3";
+                    name = "DZRH News Manila";
+                }
+
+                bool ok = RadioPlayer::GetInstance().Play(url, name);
+                if (!ok) {
+                    return std::unexpected("Failed to start news broadcast");
+                }
+                return "Now playing live news broadcast: " + name;
+            });
     }
 
 public:

@@ -111,9 +111,12 @@ bool RadioPlayer::Play(const std::string& input_url, const std::string& station_
     } else if (lower_input.find("mor1019") != std::string::npos || lower_name.find("mor") != std::string::npos) {
         resolved_url = "https://playerservices.streamtheworld.com/api/livestream-redirect/MORFM_S01.mp3";
         resolved_name = "MOR 101.9";
-    } else if (lower_input.find("dzrh") != std::string::npos || lower_name.find("dzrh") != std::string::npos) {
+    } else if (lower_input.find("bbc") != std::string::npos || lower_name.find("bbc") != std::string::npos) {
+        resolved_url = "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service";
+        resolved_name = "BBC World Service";
+    } else if (lower_input.find("dzrh") != std::string::npos || lower_name.find("dzrh") != std::string::npos || lower_input.find("news") != std::string::npos || lower_name.find("news") != std::string::npos) {
         resolved_url = "https://azura.dzrh.com.ph/listen/dzrh_manila/radio.mp3";
-        resolved_name = "DZRH News";
+        resolved_name = "DZRH News Manila";
     } else if (lower_input.find("star") != std::string::npos || lower_name.find("star") != std::string::npos) {
         resolved_url = "https://stream-13.zeno.fm/g1pmt17nz9duv";
         resolved_name = "Star FM Manila";
@@ -895,4 +898,91 @@ std::string RadioPlayer::PlaySongOrFallback(const std::string& query) {
     Play("https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3", "Love Radio 90.7 (OPM)");
     return "Music bridge offline or not found. Playing live Philippine OPM radio: Love Radio 90.7";
 }
+
+std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
+    std::string safe_cat = category.empty() ? "philippines" : category;
+    std::transform(safe_cat.begin(), safe_cat.end(), safe_cat.begin(), ::tolower);
+
+    std::string encoded_cat;
+    for (char c : safe_cat) {
+        if (isalnum(static_cast<unsigned char>(c))) {
+            encoded_cat += c;
+        } else if (c == ' ') {
+            encoded_cat += "%20";
+        }
+    }
+
+    std::string bridge_host = MUSIC_BRIDGE_HOST;
+    int bridge_port = MUSIC_BRIDGE_PORT;
+    std::string url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/news?category=" + encoded_cat + "&limit=5";
+
+    ESP_LOGI(TAG, "Fetching news headlines from: %s", url.c_str());
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->ShowNotification("Fetching News...", 2000);
+    }
+
+    auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+    if (!http) {
+        return "Unable to initialize network request for news headlines.";
+    }
+
+    http->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
+    http->SetHeader("Accept", "application/json");
+    http->SetTimeout(6000);
+
+    if (!http->Open("GET", url)) {
+        http->Close();
+        return "Failed to connect to news service. Please ensure the local bridge is running.";
+    }
+
+    auto status = http->GetStatusCode();
+    if (!status || *status < 200 || *status >= 300) {
+        http->Close();
+        return "News service responded with an error (HTTP status code).";
+    }
+
+    std::string body;
+    char buf[512];
+    while (body.size() < 12288) {
+        auto read_res = http->Read(buf, sizeof(buf) - 1);
+        if (!read_res || *read_res == 0) break;
+        buf[*read_res] = '\0';
+        body.append(buf, *read_res);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (!root) {
+        return "Failed to parse news headlines response.";
+    }
+
+    cJSON* headlines_arr = cJSON_GetObjectItem(root, "headlines");
+    if (!headlines_arr || !cJSON_IsArray(headlines_arr) || cJSON_GetArraySize(headlines_arr) == 0) {
+        cJSON_Delete(root);
+        return "No recent news headlines found for category: " + safe_cat;
+    }
+
+    std::string summary = "Latest " + safe_cat + " news headlines:\n";
+    int count = cJSON_GetArraySize(headlines_arr);
+    for (int i = 0; i < count; ++i) {
+        cJSON* item = cJSON_GetArrayItem(headlines_arr, i);
+        if (!item) continue;
+        cJSON* title_item = cJSON_GetObjectItem(item, "title");
+        cJSON* source_item = cJSON_GetObjectItem(item, "source");
+        const char* title = (title_item && cJSON_IsString(title_item)) ? title_item->valuestring : "Headline";
+        const char* src = (source_item && cJSON_IsString(source_item)) ? source_item->valuestring : "";
+
+        summary += std::to_string(i + 1) + ". " + title;
+        if (src && strlen(src) > 0) {
+            summary += " (Source: " + std::string(src) + ")";
+        }
+        summary += "\n";
+    }
+
+    cJSON_Delete(root);
+    return summary;
+}
+
 
