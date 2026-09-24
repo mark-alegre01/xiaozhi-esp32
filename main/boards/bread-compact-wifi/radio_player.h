@@ -22,6 +22,8 @@ public:
 
     static std::string SearchStationsOnline(const std::string& query);
     static std::string FetchNewsHeadlines(const std::string& category = "philippines");
+    static std::string GetBridgeHost();
+    static void DiscoverBridge();
     std::string PlaySongOrFallback(const std::string& query);
 
 private:

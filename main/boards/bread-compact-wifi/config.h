@@ -55,7 +55,7 @@
 
 
 // Music Bridge Configuration (PC running music_bridge.py for YouTube audio)
-#define MUSIC_BRIDGE_HOST "192.168.1.46"
+#define MUSIC_BRIDGE_HOST "192.168.1.49"
 #define MUSIC_BRIDGE_PORT 8080
 
 // A MCP Test: Control a lamp

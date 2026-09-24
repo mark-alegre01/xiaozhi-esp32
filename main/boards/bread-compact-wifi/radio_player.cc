@@ -12,6 +12,8 @@
 #include "display/display.h"
 #include "application.h"
 #include "config.h"
+#include <lwip/sockets.h>
+#include <lwip/netdb.h>
 
 #if __has_include("simple_dec/esp_audio_simple_dec.h")
 #include "simple_dec/esp_audio_simple_dec.h"
@@ -52,6 +54,56 @@ static void EnsureDecodersRegistered() {
         registered = true;
         ESP_LOGI(TAG, "Audio decoders registered");
     }
+}
+
+static std::string g_bridge_host = MUSIC_BRIDGE_HOST;
+
+std::string RadioPlayer::GetBridgeHost() {
+    if (g_bridge_host.empty()) {
+        g_bridge_host = MUSIC_BRIDGE_HOST;
+    }
+    return g_bridge_host;
+}
+
+void RadioPlayer::DiscoverBridge() {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Failed to create UDP discovery socket");
+        return;
+    }
+
+    int broadcast = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 200000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(8088);
+    dest_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+
+    const char* msg = "XIAOZHI_DISCOVER";
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+
+    char rx_buffer[128];
+    struct sockaddr_in source_addr;
+    socklen_t socklen = sizeof(source_addr);
+    int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr*)&source_addr, &socklen);
+
+    if (len > 0) {
+        rx_buffer[len] = 0;
+        char ip_str[32] = {0};
+        int port = 8080;
+        if (sscanf(rx_buffer, "XIAOZHI_BRIDGE %31s %d", ip_str, &port) >= 1) {
+            g_bridge_host = ip_str;
+            ESP_LOGI(TAG, "Discovered music bridge at %s:%d via UDP", g_bridge_host.c_str(), port);
+        }
+    }
+    close(sock);
 }
 
 RadioPlayer& RadioPlayer::GetInstance() {
@@ -128,43 +180,47 @@ bool RadioPlayer::Play(const std::string& input_url, const std::string& station_
         resolved_name = "Love Radio 90.7";
     }
 
-    // Stop current stream if running
-    Stop();
-
+    // Store new stream and signal any running worker to stop.
+    // This runs on the WebSocket event thread, so we must NOT block.
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_search_query_.clear();
         url_ = resolved_url;
         station_name_ = resolved_name;
-        stop_requested_.store(false);
+        stop_requested_.store(true);
     }
 
     auto display = Board::GetInstance().GetDisplay();
     if (display) {
-        display->ShowNotification(station_name_, 4000);
-        display->SetStatus("Playing Radio");
+        display->ShowNotification(station_name_, 3000);
+        display->SetStatus("Playing");
     }
 
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        TaskTrampoline,
-        "radio_worker",
-        10240,
-        this,
-        5,
-        &task_handle_,
-        0
-    );
+    if (!is_playing_.load()) {
+        stop_requested_.store(false);
 
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create radio worker task");
-        if (display) {
-            display->ShowNotification("Play Failed", 3000);
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            TaskTrampoline,
+            "radio_worker",
+            10240,
+            this,
+            5,
+            &task_handle_,
+            0
+        );
+
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create radio worker task");
+            if (display) {
+                display->ShowNotification("Play Failed", 3000);
+            }
+            return false;
         }
-        return false;
+
+        is_playing_.store(true);
     }
 
-    is_playing_.store(true);
-    ESP_LOGI(TAG, "Started radio stream: %s (%s)", station_name_.c_str(), url_.c_str());
+    ESP_LOGI(TAG, "Queued background radio stream: %s (%s)", station_name_.c_str(), url_.c_str());
     return true;
 }
 
@@ -289,7 +345,7 @@ void RadioPlayer::WorkerTask() {
             }
         }
 
-        std::string bridge_host = MUSIC_BRIDGE_HOST;
+        std::string bridge_host = GetBridgeHost();
         int bridge_port = MUSIC_BRIDGE_PORT;
         std::string search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
 
@@ -298,9 +354,20 @@ void RadioPlayer::WorkerTask() {
         if (http_search) {
             http_search->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
             http_search->SetHeader("Accept", "application/json");
-            http_search->SetTimeout(6000);
+            http_search->SetTimeout(4000);
 
-            if (auto opened = http_search->Open("GET", search_url); opened) {
+            bool opened = http_search->Open("GET", search_url);
+            if (!opened) {
+                DiscoverBridge();
+                std::string new_host = GetBridgeHost();
+                if (new_host != bridge_host) {
+                    bridge_host = new_host;
+                    search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
+                    opened = http_search->Open("GET", search_url);
+                }
+            }
+
+            if (opened) {
                 auto status = http_search->GetStatusCode();
                 if (status && *status >= 200 && *status < 300) {
                     std::string body;
@@ -676,27 +743,24 @@ cleanup:
         display->SetStatus("Ready");
     }
 
-    // Check if PlaySong() queued a new song while we were streaming.
+    // Check if PlaySong() or Play() queued a new song/stream while we were streaming.
     // If so, restart the worker immediately instead of terminating.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!pending_search_query_.empty()) {
-            // A new song was queued via PlaySong() — restart
+        if (!pending_search_query_.empty() || !url_.empty()) {
+            // A new song or stream was queued — restart
             stop_requested_.store(false);
-            // task_handle_ remains valid (we are still running)
-            ESP_LOGI(TAG, "Restarting worker for new song: %s", pending_search_query_.c_str());
-            // Recursive restart: just call WorkerTask() again from this context
-            // Reset state so WorkerTask re-entry works correctly
             is_playing_.store(true);
+            ESP_LOGI(TAG, "Restarting worker for new stream/song");
         } else {
             is_playing_.store(false);
             task_handle_ = nullptr;
         }
     }
 
-    // If there's a new pending song, re-enter the task body
+    // If there's a new pending song/stream, re-enter the task body
     if (is_playing_.load() && !stop_requested_.load()) {
-        ESP_LOGI(TAG, "Re-entering WorkerTask for new song");
+        ESP_LOGI(TAG, "Re-entering WorkerTask for queued stream");
         WorkerTask();  // tail call
         return;  // vTaskDelete already called by recursive WorkerTask()
     }
@@ -912,7 +976,7 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
         }
     }
 
-    std::string bridge_host = MUSIC_BRIDGE_HOST;
+    std::string bridge_host = GetBridgeHost();
     int bridge_port = MUSIC_BRIDGE_PORT;
     std::string url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/news?category=" + encoded_cat + "&limit=5";
 
@@ -930,9 +994,21 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
 
     http->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
     http->SetHeader("Accept", "application/json");
-    http->SetTimeout(6000);
+    http->SetTimeout(4000);
 
-    if (!http->Open("GET", url)) {
+    bool opened = http->Open("GET", url);
+    if (!opened) {
+        ESP_LOGW(TAG, "Failed to connect to %s, attempting UDP discovery...", bridge_host.c_str());
+        DiscoverBridge();
+        std::string new_host = GetBridgeHost();
+        if (new_host != bridge_host) {
+            bridge_host = new_host;
+            url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/news?category=" + encoded_cat + "&limit=5";
+            opened = http->Open("GET", url);
+        }
+    }
+
+    if (!opened) {
         http->Close();
         return "Failed to connect to news service. Please ensure the local bridge is running.";
     }

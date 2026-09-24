@@ -285,7 +285,14 @@ private:
                 Property("category", kPropertyTypeString, std::string("philippines"))
             }),
             [](const PropertyList& props) -> ToolResult {
-                auto category = props["category"].value<std::string>();
+                std::string category = "philippines";
+                try {
+                    auto prop = props["category"];
+                    category = prop.value<std::string>();
+                } catch (...) {
+                    category = "philippines";
+                }
+                if (category.empty()) category = "philippines";
                 return RadioPlayer::FetchNewsHeadlines(category);
             });
 
@@ -298,7 +305,14 @@ private:
                 Property("station", kPropertyTypeString, std::string("DZRH"))
             }),
             [](const PropertyList& props) -> ToolResult {
-                auto station = props["station"].value<std::string>();
+                std::string station = "DZRH";
+                try {
+                    auto prop = props["station"];
+                    station = prop.value<std::string>();
+                } catch (...) {
+                    station = "DZRH";
+                }
+                if (station.empty()) station = "DZRH";
                 std::string lower_station = station;
                 std::transform(lower_station.begin(), lower_station.end(), lower_station.begin(), ::tolower);
 
