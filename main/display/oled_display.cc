@@ -104,6 +104,11 @@ void OledDisplay::SetupUI() {
 }
 
 OledDisplay::~OledDisplay() {
+    if (talking_timer_ != nullptr) {
+        lv_timer_del(talking_timer_);
+        talking_timer_ = nullptr;
+    }
+
     if (content_ != nullptr) {
         lv_obj_del(content_);
     }
@@ -158,27 +163,36 @@ bool OledDisplay::Lock(int timeout_ms) { return lvgl_port_lock(timeout_ms); }
 void OledDisplay::Unlock() { lvgl_port_unlock(); }
 
 void OledDisplay::SetChatMessage(const char* role, const char* content) {
+    // Caption/subtitle display disabled for OLED — face is always shown
+    // No-op: do not hide face or show any text overlay
+    (void)role;
+    (void)content;
+}
+
+void OledDisplay::SetStatus(const char* status) {
+    // Let the base class update the status label
+    LvglDisplay::SetStatus(status);
+
+    if (height_ != 64 || face_image_ == nullptr) return;
+
+    // Detect speaking state to start/stop talking mouth animation
+    bool speaking = (status != nullptr && strstr(status, "peaking") != nullptr);
+
     DisplayLockGuard lock(this);
-    if (chat_message_label_ == nullptr) {
-        return;
-    }
-
-    // Replace all newlines with spaces
-    std::string content_str = content;
-    std::replace(content_str.begin(), content_str.end(), '\n', ' ');
-
-    lv_anim_delete(chat_message_label_, nullptr);
-    if (content_right_ == nullptr) {
-        lv_label_set_text(chat_message_label_, content_str.c_str());
-    } else {
-        if (content == nullptr || content[0] == '\0') {
-            lv_obj_add_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
-            if (face_image_) lv_obj_remove_flag(face_image_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_label_set_text(chat_message_label_, content_str.c_str());
-            lv_obj_remove_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
-            if (face_image_) lv_obj_add_flag(face_image_, LV_OBJ_FLAG_HIDDEN);
+    if (speaking && !is_speaking_) {
+        is_speaking_ = true;
+        mouth_frame_ = 0;
+        if (talking_timer_ == nullptr) {
+            talking_timer_ = lv_timer_create(TalkTimerCallback, 140, this);
         }
+    } else if (!speaking && is_speaking_) {
+        is_speaking_ = false;
+        if (talking_timer_ != nullptr) {
+            lv_timer_del(talking_timer_);
+            talking_timer_ = nullptr;
+        }
+        // Restore resting face
+        DrawFaceBitmap(current_face_bitmap_ ? current_face_bitmap_ : oled_face_neutral);
     }
 }
 
@@ -260,7 +274,7 @@ void OledDisplay::SetupUI_128x64() {
     lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
     lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
 
-    /* Content */
+    /* Content — full 48px area for robot face, no text overlays */
     content_ = lv_obj_create(container_);
     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_radius(content_, 0, 0);
@@ -271,29 +285,6 @@ void OledDisplay::SetupUI_128x64() {
     lv_obj_set_style_layout(content_, LV_LAYOUT_NONE, 0);
 
     CreateRobotEyes(content_);
-
-    content_right_ = lv_obj_create(content_);
-    lv_obj_set_size(content_right_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_all(content_right_, 0, 0);
-    lv_obj_set_style_border_width(content_right_, 0, 0);
-    lv_obj_set_flex_grow(content_right_, 1);
-    lv_obj_add_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
-
-    chat_message_label_ = lv_label_create(content_right_);
-    lv_label_set_text(chat_message_label_, "");
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_width(chat_message_label_, width_ - 32);
-    lv_obj_set_style_pad_top(chat_message_label_, 14, 0);
-
-    // Start scrolling subtitle after a delay
-    static lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_delay(&a, 1000);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_obj_set_style_anim(chat_message_label_, &a, LV_PART_MAIN);
-    lv_obj_set_style_anim_duration(chat_message_label_, lv_anim_speed_clamped(60, 300, 60000),
-                                   LV_PART_MAIN);
 
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
@@ -447,6 +438,8 @@ void OledDisplay::DrawFaceBitmap(const uint8_t* bitmap_1bit) {
 void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
     auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->face_image_) return;
+    // Don't blink while speaking — talking animation takes over
+    if (self->is_speaking_) return;
 
     // Fast blink: draw blink frame
     self->DrawFaceBitmap(oled_face_blink);
@@ -454,11 +447,26 @@ void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
     // Reopen eyes after 120ms
     lv_timer_create([](lv_timer_t* t) {
         auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(t));
-        if (self && self->face_image_) {
+        if (self && self->face_image_ && !self->is_speaking_) {
             self->DrawFaceBitmap(self->current_face_bitmap_ ? self->current_face_bitmap_ : oled_face_neutral);
         }
         lv_timer_del(t);
     }, 120, self);
+}
+
+void OledDisplay::DrawTalkFrame() {
+    if (!face_image_) return;
+    // Use current emotion's eye rows (from current_face_bitmap_) combined with talk mouth
+    // For simplicity use talk frames which have neutral eyes + varying mouth
+    const uint8_t* frame = oled_talk_frames[mouth_frame_ % 4];
+    DrawFaceBitmap(frame);
+    mouth_frame_ = (mouth_frame_ + 1) % 4;
+}
+
+void OledDisplay::TalkTimerCallback(lv_timer_t* timer) {
+    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
+    if (!self || !self->face_image_ || !self->is_speaking_) return;
+    self->DrawTalkFrame();
 }
 
 void OledDisplay::SetEmotion(const char* emotion) {

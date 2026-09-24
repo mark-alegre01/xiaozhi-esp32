@@ -14,12 +14,9 @@ private:
     lv_obj_t* top_bar_ = nullptr;
     lv_obj_t* status_bar_ = nullptr;
     lv_obj_t* content_ = nullptr;
-    lv_obj_t* content_left_ = nullptr;
-    lv_obj_t* content_right_ = nullptr;
     lv_obj_t* container_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* emotion_label_ = nullptr;
-    lv_obj_t* chat_message_label_ = nullptr;
 
     lv_obj_t* face_image_ = nullptr;
     lv_image_dsc_t face_img_dsc_;
@@ -27,9 +24,16 @@ private:
     const uint8_t* current_face_bitmap_ = nullptr;
     lv_timer_t* blink_timer_ = nullptr;
 
+    // Talking animation state
+    lv_timer_t* talking_timer_ = nullptr;
+    int mouth_frame_ = 0;
+    bool is_speaking_ = false;
+
     void CreateRobotEyes(lv_obj_t* parent);
     void DrawFaceBitmap(const uint8_t* bitmap_1bit);
+    void DrawTalkFrame();
     static void BlinkTimerCallback(lv_timer_t* timer);
+    static void TalkTimerCallback(lv_timer_t* timer);
 
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
@@ -43,6 +47,7 @@ public:
     ~OledDisplay();
 
     virtual void SetupUI() override;
+    virtual void SetStatus(const char* status) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetTheme(Theme* theme) override;
