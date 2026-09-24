@@ -8,6 +8,7 @@
 #include <atomic>
 
 class AudioCodec;
+class Http;
 
 class RadioPlayer {
 public:
@@ -44,6 +45,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     TaskHandle_t task_handle_ = nullptr;
     AudioCodec* codec_ = nullptr;
+    Http* http_active_ = nullptr;  // set while streaming; Stop() calls Close() to unblock Read()
 };
 
 #endif // RADIO_PLAYER_H_

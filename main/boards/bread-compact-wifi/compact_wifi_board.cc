@@ -110,6 +110,7 @@ private:
             }
             if (RadioPlayer::GetInstance().IsPlaying()) {
                 RadioPlayer::GetInstance().Stop();
+                return;  // first press stops music; second press opens chat
             }
             app.ToggleChatState();
         });
@@ -122,6 +123,7 @@ private:
             }
             if (RadioPlayer::GetInstance().IsPlaying()) {
                 RadioPlayer::GetInstance().Stop();
+                return;  // first press stops music; second press opens chat
             }
             app.ToggleChatState();
         });

@@ -12,6 +12,7 @@
 #include "display/display.h"
 #include "application.h"
 #include "config.h"
+#include <http.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 
@@ -282,19 +283,25 @@ void RadioPlayer::Stop() {
     }
 
     ESP_LOGI(TAG, "Stopping radio stream...");
-    stop_requested_.store(true);
 
-    int wait_ms = 0;
-    while (task_handle_ != nullptr && wait_ms < 3000) {
-        lock.unlock();
-        vTaskDelay(pdMS_TO_TICKS(50));
-        wait_ms += 50;
-        lock.lock();
+    // Clear any pending song/stream so the worker won't restart after exiting
+    pending_search_query_.clear();
+    url_.clear();
+
+    // Signal the streaming loop to stop
+    stop_requested_.store(true);
+    is_playing_.store(false);
+
+    // Interrupt the blocking http->Read() so the worker exits immediately.
+    // We release the lock first so the worker task can proceed to clear http_active_
+    // after Close() returns (avoiding a potential deadlock).
+    Http* http_to_close = http_active_;
+    lock.unlock();
+    if (http_to_close != nullptr) {
+        http_to_close->Close();  // unblocks the blocking Read() in WorkerTask
     }
 
-    is_playing_.store(false);
-    stop_requested_.store(false);
-
+    // Immediately kill audio output so there's no more sound
     if (codec_ != nullptr) {
         codec_->UnlockOutput();
         if (codec_->output_enabled()) {
@@ -304,10 +311,10 @@ void RadioPlayer::Stop() {
 
     auto display = Board::GetInstance().GetDisplay();
     if (display) {
-        display->ShowNotification("Radio Stopped", 2000);
+        display->ShowNotification("Stopped", 2000);
         display->SetStatus("Ready");
     }
-    ESP_LOGI(TAG, "Radio playback stopped cleanly");
+    ESP_LOGI(TAG, "Radio stop signalled; worker will clean up asynchronously");
 }
 
 void RadioPlayer::WorkerTask() {
@@ -546,6 +553,11 @@ void RadioPlayer::WorkerTask() {
         constexpr size_t kMaxAccBuf = 128 * 1024;
 
         // ── Phase 4: Streaming & Decode Loop ────────────────────────────────
+        // Register active http handle so Stop() can close it to interrupt Read()
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            http_active_ = http.get();
+        }
         while (!stop_requested_.load()) {
             auto read_res = http->Read(reinterpret_cast<char*>(http_buf.data()), http_buf.size());
             if (!read_res) {
@@ -727,13 +739,20 @@ void RadioPlayer::WorkerTask() {
             resampler = nullptr;
         }
 
+        // Unregister before closing so Stop() won't call Close() twice
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            http_active_ = nullptr;
+        }
         esp_audio_simple_dec_close(dec_handle);
         http->Close();
     }
 
 cleanup:
     Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-    if (codec_ != nullptr) {
+    // Only clean up codec if Stop() hasn't already done so
+    // (Stop() sets is_playing_=false and calls UnlockOutput before we reach here)
+    if (codec_ != nullptr && is_playing_.load()) {
         codec_->UnlockOutput();
         if (codec_->output_enabled()) {
             codec_->EnableOutput(false);
@@ -747,13 +766,14 @@ cleanup:
     // If so, restart the worker immediately instead of terminating.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!pending_search_query_.empty() || !url_.empty()) {
+        if (!stop_requested_.load() && (!pending_search_query_.empty() || !url_.empty())) {
             // A new song or stream was queued — restart
             stop_requested_.store(false);
             is_playing_.store(true);
             ESP_LOGI(TAG, "Restarting worker for new stream/song");
         } else {
             is_playing_.store(false);
+            stop_requested_.store(false);
             task_handle_ = nullptr;
         }
     }
