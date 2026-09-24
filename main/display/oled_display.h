@@ -21,14 +21,14 @@ private:
     lv_obj_t* emotion_label_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
 
-    lv_obj_t* eyes_container_ = nullptr;
-    lv_obj_t* left_eye_ = nullptr;
-    lv_obj_t* right_eye_ = nullptr;
-    lv_obj_t* left_pupil_ = nullptr;
-    lv_obj_t* right_pupil_ = nullptr;
+    lv_obj_t* face_image_ = nullptr;
+    lv_image_dsc_t face_img_dsc_;
+    uint16_t* face_buffer_rgb565_ = nullptr;
+    const uint8_t* current_face_bitmap_ = nullptr;
     lv_timer_t* blink_timer_ = nullptr;
 
     void CreateRobotEyes(lv_obj_t* parent);
+    void DrawFaceBitmap(const uint8_t* bitmap_1bit);
     static void BlinkTimerCallback(lv_timer_t* timer);
 
     virtual bool Lock(int timeout_ms = 0) override;
