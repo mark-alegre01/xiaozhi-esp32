@@ -14,6 +14,7 @@ public:
     static RadioPlayer& GetInstance();
 
     bool Play(const std::string& url, const std::string& station_name = "Radio");
+    bool PlaySong(const std::string& query);
     void Stop();
     bool IsPlaying() const { return is_playing_.load(); }
     std::string GetCurrentStation() const;
@@ -35,6 +36,7 @@ private:
     std::mutex mutex_;
     std::string url_;
     std::string station_name_;
+    std::string pending_search_query_;
     std::atomic<bool> is_playing_{false};
     std::atomic<bool> stop_requested_{false};
     TaskHandle_t task_handle_ = nullptr;

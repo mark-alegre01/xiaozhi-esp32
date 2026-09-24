@@ -183,7 +183,13 @@ private:
                 if (query.empty()) {
                     return std::unexpected("Song query cannot be empty");
                 }
-                return RadioPlayer::GetInstance().PlaySongOrFallback(query);
+                // PlaySong() is non-blocking: starts a background FreeRTOS task
+                // so the WebSocket thread is NOT blocked during TTS playback.
+                bool ok = RadioPlayer::GetInstance().PlaySong(query);
+                if (!ok) {
+                    return std::unexpected("Failed to start song search");
+                }
+                return std::string("Searching and playing '") + query + "' in the background";
             });
 
         mcp.AddTool(
@@ -210,12 +216,17 @@ private:
                     return std::unexpected("Stream URL or name cannot be empty");
                 }
 
-                // If URL does not look like a direct HTTP/HTTPS link, route to song search
+                // If URL does not look like a direct HTTP/HTTPS link, treat as song query
+                // Use non-blocking PlaySong() so the WebSocket thread isn't blocked
                 if (!url.empty() && url.find("http://") != 0 && url.find("https://") != 0) {
-                    return RadioPlayer::GetInstance().PlaySongOrFallback(url);
+                    bool ok = RadioPlayer::GetInstance().PlaySong(url);
+                    if (!ok) return std::unexpected("Failed to start song search");
+                    return std::string("Searching and playing '") + url + "' in the background";
                 }
                 if (url.empty() && !name.empty() && name != "Radio") {
-                    return RadioPlayer::GetInstance().PlaySongOrFallback(name);
+                    bool ok = RadioPlayer::GetInstance().PlaySong(name);
+                    if (!ok) return std::unexpected("Failed to start song search");
+                    return std::string("Searching and playing '") + name + "' in the background";
                 }
 
                 bool ok = RadioPlayer::GetInstance().Play(url, name);
