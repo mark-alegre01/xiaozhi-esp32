@@ -356,14 +356,14 @@ void RadioPlayer::WorkerTask() {
             http_search->SetHeader("Accept", "application/json");
             http_search->SetTimeout(4000);
 
-            bool opened = http_search->Open("GET", search_url);
+            bool opened = http_search->Open("GET", search_url).has_value();
             if (!opened) {
                 DiscoverBridge();
                 std::string new_host = GetBridgeHost();
                 if (new_host != bridge_host) {
                     bridge_host = new_host;
                     search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
-                    opened = http_search->Open("GET", search_url);
+                    opened = http_search->Open("GET", search_url).has_value();
                 }
             }
 
@@ -996,7 +996,7 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
     http->SetHeader("Accept", "application/json");
     http->SetTimeout(4000);
 
-    bool opened = http->Open("GET", url);
+    bool opened = http->Open("GET", url).has_value();
     if (!opened) {
         ESP_LOGW(TAG, "Failed to connect to %s, attempting UDP discovery...", bridge_host.c_str());
         DiscoverBridge();
@@ -1004,7 +1004,7 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
         if (new_host != bridge_host) {
             bridge_host = new_host;
             url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/news?category=" + encoded_cat + "&limit=5";
-            opened = http->Open("GET", url);
+            opened = http->Open("GET", url).has_value();
         }
     }
 
