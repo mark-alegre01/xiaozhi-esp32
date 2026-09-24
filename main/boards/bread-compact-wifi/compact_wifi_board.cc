@@ -117,8 +117,7 @@ private:
         // Touch button: tap/click to toggle chat mode; long-press to push-to-talk
         touch_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting) {
-                EnterWifiConfigMode();
+            if (app.GetDeviceState() <= kDeviceStateStarting) {
                 return;
             }
             if (RadioPlayer::GetInstance().IsPlaying()) {
