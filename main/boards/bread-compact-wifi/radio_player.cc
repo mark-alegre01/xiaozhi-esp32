@@ -148,6 +148,13 @@ bool RadioPlayer::Play(const std::string& input_url, const std::string& station_
     std::string lower_name = station_name;
     std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
 
+    // If input is a YouTube URL or YouTube search, redirect to PlaySong()
+    if (lower_input.find("youtube.com") != std::string::npos || lower_input.find("youtu.be") != std::string::npos ||
+        lower_name.find("youtube") != std::string::npos) {
+        std::string query = (!station_name.empty() && station_name != "Radio") ? station_name : input_url;
+        return PlaySong(query);
+    }
+
     // Smart remap for dead URLs or station name inputs to verified live broadcasts
     if (lower_input.find("loveradio") != std::string::npos || lower_name.find("love radio") != std::string::npos || lower_name.find("dzmb") != std::string::npos) {
         resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
@@ -177,6 +184,9 @@ bool RadioPlayer::Play(const std::string& input_url, const std::string& station_
         resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
         resolved_name = "Love Radio Manila";
     } else if (resolved_url.empty() || (resolved_url.find("http://") != 0 && resolved_url.find("https://") != 0)) {
+        if (!station_name.empty() && station_name != "Radio") {
+            return PlaySong(station_name);
+        }
         resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
         resolved_name = "Love Radio 90.7";
     }
@@ -361,17 +371,18 @@ void RadioPlayer::WorkerTask() {
         if (http_search) {
             http_search->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
             http_search->SetHeader("Accept", "application/json");
-            http_search->SetTimeout(4000);
+            http_search->SetTimeout(12000);
 
             bool opened = http_search->Open("GET", search_url).has_value();
             if (!opened) {
+                ESP_LOGI(TAG, "Direct connect to bridge at %s failed, attempting UDP discovery...", bridge_host.c_str());
                 DiscoverBridge();
                 std::string new_host = GetBridgeHost();
                 if (new_host != bridge_host) {
                     bridge_host = new_host;
-                    search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
-                    opened = http_search->Open("GET", search_url).has_value();
                 }
+                search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
+                opened = http_search->Open("GET", search_url).has_value();
             }
 
             if (opened) {
@@ -410,9 +421,13 @@ void RadioPlayer::WorkerTask() {
         }
 
         if (!found || stream_url.empty()) {
-            ESP_LOGW(TAG, "Bridge offline or song not found. Falling back to Love Radio.");
-            stream_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
-            display_name = "Love Radio (OPM Live)";
+            ESP_LOGW(TAG, "Bridge offline or song not found: '%s'", search_query.c_str());
+            if (display) {
+                display->ShowNotification("Song Not Found", 4000);
+                display->SetStatus("Failed");
+            }
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            goto cleanup;
         }
 
         {
@@ -978,9 +993,12 @@ std::string RadioPlayer::PlaySongOrFallback(const std::string& query) {
         return "Now playing " + song_title + " from YouTube";
     }
 
-    ESP_LOGW(TAG, "Music bridge unreachable or song not found. Falling back to live OPM radio.");
-    Play("https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3", "Love Radio 90.7 (OPM)");
-    return "Music bridge offline or not found. Playing live Philippine OPM radio: Love Radio 90.7";
+    ESP_LOGW(TAG, "Music bridge unreachable or song not found: '%s'", query.c_str());
+    if (display) {
+        display->ShowNotification("Song Not Found", 3000);
+        display->SetStatus("Failed");
+    }
+    return "Music bridge offline or song '" + query + "' not found on YouTube.";
 }
 
 std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {

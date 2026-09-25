@@ -175,8 +175,9 @@ private:
         // Dedicated YouTube / Online Song Player
         mcp.AddTool(
             "self.music.play_song",
-            "Search and play any specific song, music track, or artist (such as Philippine OPM music, pop, rock, Eraserheads, Ben&Ben, etc.) on YouTube or online. "
-            "Call this tool whenever the user asks to play a song, play music, or listen to an artist or track.",
+            "Search and play ANY specific song, music track, artist, album, or YouTube audio (e.g. Philippine OPM, Pop, Rock, Eraserheads, Ben&Ben, Taylor Swift, Queen, etc.). "
+            "You MUST call this tool whenever the user asks to play a song, play music, listen to an artist/track, or play anything from YouTube. "
+            "Pass the exact song title and/or artist in 'query'.",
             PropertyList({
                 Property("query", kPropertyTypeString)
             }),
@@ -191,7 +192,7 @@ private:
                 if (!ok) {
                     return std::unexpected("Failed to start song search");
                 }
-                return std::string("Searching and playing '") + query + "' in the background";
+                return std::string("Searching and playing '") + query + "' from YouTube in the background";
             });
 
         mcp.AddTool(
@@ -205,8 +206,9 @@ private:
 
         mcp.AddTool(
             "self.radio.play",
-            "Play a Philippine internet radio station, OPM music stream, or any audio stream URL through the speaker. "
-            "Call this tool when the user asks to play a radio station, listen to Filipino music, or stream audio.",
+            "Tune into a live broadcast Philippine FM/AM internet radio station ONLY (such as Love Radio 90.7, Yes The Best 101.1, Easy Rock 96.3, DZRH News, BBC World Service, Barangay LS 97.1, MOR 101.9, Star FM). "
+            "DO NOT call this tool for songs, individual music tracks, artists, or YouTube music — call self.music.play_song instead! "
+            "Only call this when the user specifically asks to listen to live radio or a named radio station.",
             PropertyList({
                 Property("url", kPropertyTypeString),
                 Property("name", kPropertyTypeString, std::string("Radio"))
@@ -218,6 +220,20 @@ private:
                     return std::unexpected("Stream URL or name cannot be empty");
                 }
 
+                std::string lower_url = url;
+                std::transform(lower_url.begin(), lower_url.end(), lower_url.begin(), ::tolower);
+                std::string lower_name = name;
+                std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+
+                // Check if this is actually a YouTube URL or query
+                if (lower_url.find("youtube.com") != std::string::npos || lower_url.find("youtu.be") != std::string::npos ||
+                    lower_name.find("youtube") != std::string::npos) {
+                    std::string query = (!name.empty() && name != "Radio") ? name : url;
+                    bool ok = RadioPlayer::GetInstance().PlaySong(query);
+                    if (!ok) return std::unexpected("Failed to start song search");
+                    return std::string("Searching and playing '") + query + "' from YouTube in the background";
+                }
+
                 // If URL does not look like a direct HTTP/HTTPS link, treat as song query
                 // Use non-blocking PlaySong() so the WebSocket thread isn't blocked
                 if (!url.empty() && url.find("http://") != 0 && url.find("https://") != 0) {
@@ -225,7 +241,27 @@ private:
                     if (!ok) return std::unexpected("Failed to start song search");
                     return std::string("Searching and playing '") + url + "' in the background";
                 }
-                if (url.empty() && !name.empty() && name != "Radio") {
+
+                // Known radio stations list
+                static const char* const kKnownStations[] = {
+                    "love radio", "loveradio", "dzmb", "90.7",
+                    "yes fm", "yesfm", "yes the best", "101.1",
+                    "easy rock", "easyrock", "dwrk", "96.3",
+                    "barangay", "97.1", "mor", "mor 101.9",
+                    "bbc", "bbc world", "dzrh", "news",
+                    "star fm", "starfm", "wish 107.5", "wish"
+                };
+
+                bool is_known_station = false;
+                for (const char* st : kKnownStations) {
+                    if (lower_name.find(st) != std::string::npos || lower_url.find(st) != std::string::npos) {
+                        is_known_station = true;
+                        break;
+                    }
+                }
+
+                // If user provided a name that is NOT a known radio station and NOT "Radio", it's a song query!
+                if (!is_known_station && !name.empty() && name != "Radio") {
                     bool ok = RadioPlayer::GetInstance().PlaySong(name);
                     if (!ok) return std::unexpected("Failed to start song search");
                     return std::string("Searching and playing '") + name + "' in the background";
