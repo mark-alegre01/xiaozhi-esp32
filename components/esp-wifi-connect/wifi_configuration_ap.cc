@@ -10,8 +10,8 @@
 #include <esp_mac.h>
 #include <esp_netif.h>
 #include <lwip/ip_addr.h>
-#if CONFIG_LWIP_IPV4_NAPT
-#include "esp_netif_napt.h"
+#if IP_NAPT
+#include "lwip/lwip_napt.h"
 #endif
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -874,9 +874,13 @@ bool WifiConfigurationAp::ConnectToPisoWifi(const std::string &ssid, const std::
     out_gateway = gw_str;
     ESP_LOGI(TAG, "Piso Wi-Fi STA IP: " IPSTR ", Gateway: %s", IP2STR(&ip_info.ip), gw_str);
 
-#if CONFIG_LWIP_IPV4_NAPT
-    esp_err_t err = esp_netif_napt_enable(sta_netif);
-    ESP_LOGI(TAG, "NAPT enabled on STA netif: %d", err);
+#if IP_NAPT
+    // Enable NAPT on the AP interface so clients connected to the robot's
+    // hotspot can route traffic through the STA (Piso Wi-Fi) connection.
+    if (ap_netif_) {
+        esp_err_t napt_err = esp_netif_napt_enable(ap_netif_);
+        ESP_LOGI(TAG, "NAPT enabled on AP netif: %s", esp_err_to_name(napt_err));
+    }
 #endif
 
     return true;
