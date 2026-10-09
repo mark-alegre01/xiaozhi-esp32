@@ -516,18 +516,21 @@
         <div class="piso-card">
             <div style="font-size: 46px; line-height: 1; margin-bottom: 8px;">🪙</div>
             <h2 style="margin: 0 0 6px; font-size: 20px; font-weight: 700;">Piso Wi-Fi Connected!</h2>
-            <p style="color: var(--text-muted); font-size: 13px; margin: 0 0 16px;">
+            <p style="color: var(--text-muted); font-size: 13px; margin: 0 0 6px;">
                 Gateway: <strong id="piso_gw_display" style="color: var(--accent);">http://10.0.0.1</strong>
+            </p>
+            <p style="color: var(--text-muted); font-size: 13px; margin: 0 0 14px;">
+                Active MAC on Portal: <strong id="piso_mac_display" style="color: #10b981; font-family: monospace; background: rgba(16,185,129,0.1); padding: 2px 6px; border-radius: 4px;">--:--:--:--:--:--</strong>
             </p>
             
             <div style="background: var(--surface-muted); padding: 14px; border-radius: var(--radius-sm); text-align: left; margin-bottom: 14px; font-size: 13px; line-height: 1.5; border: 1px solid var(--border);">
-                <div style="font-weight: 700; margin-bottom: 6px; color: var(--text);">How to insert coins:</div>
-                <div style="margin-bottom: 5px;">1. Tap <b>"Open Dashboard"</b> below to launch the Piso Wi-Fi page.</div>
-                <div style="margin-bottom: 5px;">2. Tap <b>"Insert Coin"</b> on the page and drop your coins into the vending machine.</div>
-                <div style="margin-bottom: 5px;">3. Wait until the dashboard confirms your paid internet time.</div>
+                <div style="font-weight: 700; margin-bottom: 6px; color: var(--text);">How to activate:</div>
+                <div style="margin-bottom: 5px;">1. Tap <b>"Open Dashboard"</b> below to launch the Piso Wi-Fi portal.</div>
+                <div style="margin-bottom: 5px;">2. Verify the <b>Status MAC</b> on the portal matches the MAC shown above.</div>
+                <div style="margin-bottom: 5px;">3. Tap <b>"INSERT COIN"</b> or type voucher code and connect.</div>
                 <div>4. Switch back to this screen and tap <b>"Done (Start Robot)"</b>.</div>
                 <div style="margin-top: 8px; color: #f43f5e; font-size: 11px;">
-                    <i>💡 Tip: If the dashboard doesn't open, temporarily turn off Mobile Data so your phone uses the robot's Wi-Fi link.</i>
+                    <i>💡 Tip: Keep connected to the robot hotspot. If using phone, turn off Mobile Data.</i>
                 </div>
             </div>
 
@@ -640,6 +643,18 @@
                     <p style="font-size: 12px; color: var(--text-muted); margin: 6px 0 0 26px; line-height: 1.4;">
                         Select for coin-operated networks (10.0.0.1). Routes your phone through the robot so you can insert coins directly.
                     </p>
+                    <div id="piso_mac_info" style="display: none; margin: 10px 0 0 26px;">
+                        <div style="font-size: 12px; color: var(--text); margin-bottom: 6px;">
+                            🤖 <b>Robot MAC:</b> <code id="robot_mac_tag" style="background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 4px; color: var(--accent); font-weight: bold;">Loading...</code>
+                        </div>
+                        <label for="clone_mac" style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 3px;">
+                            Optional: Clone Already-Paid Device MAC
+                        </label>
+                        <input type="text" id="clone_mac" name="clone_mac" placeholder="e.g. 98:59:7A:E0:BD:DE" maxlength="17" style="font-size: 13px; font-family: monospace; padding: 6px 10px; width: 100%; box-sizing: border-box;">
+                        <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">
+                            💡 If you already inserted coins or used a voucher on your phone/PC, enter its MAC address here to share the connection instantly without paying again!
+                        </div>
+                    </div>
                 </div>
                 <p>
                     <input type="submit" value="Connect" id="button" data-lang-value="connect">
@@ -1722,21 +1737,39 @@
         function onPisoToggle(checked) {
             const btn = document.getElementById('button');
             const pwd = document.getElementById('password');
+            const macInfo = document.getElementById('piso_mac_info');
             if (checked) {
                 btn.value = '🪙 Connect to Piso Wi-Fi';
                 pwd.placeholder = '(Optional / leave blank for open networks)';
+                if (macInfo) {
+                    macInfo.style.display = 'block';
+                    fetch('/mac')
+                        .then(r => r.json())
+                        .then(d => {
+                            if (d && d.mac) {
+                                document.getElementById('robot_mac_tag').textContent = d.mac;
+                            }
+                        })
+                        .catch(() => {});
+                }
             } else {
                 const lang = document.getElementById('language').value;
                 btn.value = (translations[lang] && translations[lang].connect) || 'Connect';
                 pwd.placeholder = '';
+                if (macInfo) macInfo.style.display = 'none';
             }
         }
 
-        function showPisoModal(gw) {
+        function showPisoModal(data) {
             const modal = document.getElementById('pisoModal');
+            const gw = (typeof data === 'object') ? (data.gateway || '10.0.0.1') : data;
+            const mac = (typeof data === 'object') ? (data.mac || '') : '';
             const gwUrl = gw.startsWith('http') ? gw : ('http://' + gw);
             document.getElementById('piso_gw_display').textContent = gwUrl;
             document.getElementById('piso_open_btn').href = gwUrl;
+            if (mac) {
+                document.getElementById('piso_mac_display').textContent = mac;
+            }
             modal.classList.add('show');
         }
 
@@ -1772,10 +1805,12 @@
             loadingOverlay.classList.add('show');
 
             const isPiso = document.getElementById('piso_wifi').checked;
+            const cloneMacInput = document.getElementById('clone_mac');
             const payload = {
                 ssid: ssid.value,
                 password: document.getElementById('password').value,
-                piso_wifi: isPiso
+                piso_wifi: isPiso,
+                clone_mac: (isPiso && cloneMacInput) ? cloneMacInput.value.trim() : ''
             };
 
             try {
@@ -1795,7 +1830,7 @@
                 if (data.piso_wifi) {
                     loadingOverlay.classList.remove('show');
                     button.disabled = false;
-                    showPisoModal(data.gateway || '10.0.0.1');
+                    showPisoModal(data);
                     return;
                 }
 

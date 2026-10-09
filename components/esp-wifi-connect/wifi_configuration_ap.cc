@@ -135,11 +135,31 @@ std::string WifiConfigurationAp::GetWebServerUrl()
     return "http://192.168.4.1";
 }
 
+std::string WifiConfigurationAp::GetStaMac()
+{
+    uint8_t mac[6];
+#if CONFIG_IDF_TARGET_ESP32P4
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+#else
+    ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_STA));
+#endif
+    char mac_str[24];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return std::string(mac_str);
+}
+
 void WifiConfigurationAp::StartAccessPoint()
 {
     // Note: esp_netif_init() and esp_wifi_init() should be called once before calling this method
     // WiFi driver is initialized by WifiManager::Initialize() and kept alive
     
+    // Create the default WiFi STA interface so station connection and DHCP work
+    sta_netif_ = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!sta_netif_) {
+        sta_netif_ = esp_netif_create_default_wifi_sta();
+    }
+
     // Create the default WiFi AP interface
     ap_netif_ = esp_netif_create_default_wifi_ap();
 
@@ -414,15 +434,22 @@ void WifiConfigurationAp::StartWebServer()
             cJSON *piso_item = cJSON_GetObjectItemCaseSensitive(json, "piso_wifi");
             bool is_piso = (piso_item != NULL && cJSON_IsTrue(piso_item));
 
+            cJSON *clone_item = cJSON_GetObjectItemCaseSensitive(json, "clone_mac");
+            std::string clone_mac = "";
+            if (cJSON_IsString(clone_item) && clone_item->valuestring != NULL) {
+                clone_mac = clone_item->valuestring;
+            }
+
             if (is_piso) {
                 std::string gateway;
-                if (!this_->ConnectToPisoWifi(ssid_str, password_str, gateway)) {
+                if (!this_->ConnectToPisoWifi(ssid_str, password_str, gateway, clone_mac)) {
                     cJSON_Delete(json);
                     httpd_resp_send(req, "{\"success\":false,\"error\":\"Failed to connect to Piso Wi-Fi\"}", HTTPD_RESP_USE_STRLEN);
                     return ESP_OK;
                 }
+                std::string robot_mac = this_->piso_mac_.empty() ? this_->GetStaMac() : this_->piso_mac_;
                 cJSON_Delete(json);
-                std::string resp = "{\"success\":true,\"piso_wifi\":true,\"gateway\":\"" + gateway + "\"}";
+                std::string resp = "{\"success\":true,\"piso_wifi\":true,\"gateway\":\"" + gateway + "\",\"mac\":\"" + robot_mac + "\"}";
                 httpd_resp_set_type(req, "application/json");
                 httpd_resp_set_hdr(req, "Connection", "close");
                 httpd_resp_send(req, resp.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -516,8 +543,10 @@ void WifiConfigurationAp::StartWebServer()
         .method = HTTP_GET,
         .handler = [](httpd_req_t *req) -> esp_err_t {
             auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
+            std::string robot_mac = this_->piso_mac_.empty() ? this_->GetStaMac() : this_->piso_mac_;
             std::string resp = "{\"in_piso_mode\":" + std::string(this_->in_piso_mode_ ? "true" : "false") +
-                               ",\"gateway\":\"" + this_->piso_gateway_ + "\"}";
+                               ",\"gateway\":\"" + this_->piso_gateway_ + "\"" +
+                               ",\"mac\":\"" + robot_mac + "\"}";
             httpd_resp_set_type(req, "application/json");
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, resp.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -526,6 +555,22 @@ void WifiConfigurationAp::StartWebServer()
         .user_ctx = this
     };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &piso_status));
+
+    // Register the /mac endpoint
+    httpd_uri_t get_mac = {
+        .uri = "/mac",
+        .method = HTTP_GET,
+        .handler = [](httpd_req_t *req) -> esp_err_t {
+            auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
+            std::string resp = "{\"mac\":\"" + this_->GetStaMac() + "\"}";
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Connection", "close");
+            httpd_resp_send(req, resp.c_str(), HTTPD_RESP_USE_STRLEN);
+            return ESP_OK;
+        },
+        .user_ctx = this
+    };
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &get_mac));
 
     auto captive_portal_handler = [](httpd_req_t *req) -> esp_err_t {
         auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
@@ -748,38 +793,59 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     is_connecting_ = true;
     last_connected_channel_ = 0;
 
+    wifi_config_t wifi_config;
+    bzero(&wifi_config, sizeof(wifi_config));
+    size_t ssid_len = std::min(ssid.size(), sizeof(wifi_config.sta.ssid));
+    memcpy(wifi_config.sta.ssid, ssid.data(), ssid_len);
+
+    size_t password_len = std::min(password.size(), sizeof(wifi_config.sta.password));
+    memcpy(wifi_config.sta.password, password.data(), password_len);
+
+    if (password.empty()) {
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    }
+
+    uint8_t target_channel = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& ap : ap_records_) {
+            if (ssid == (char*)ap.ssid) {
+                target_channel = ap.primary;
+                wifi_config.sta.channel = ap.primary;
+                wifi_config.sta.scan_method = WIFI_FAST_SCAN;
+                wifi_config.sta.threshold.authmode = ap.authmode;
+                wifi_config.sta.bssid_set = 1;
+                memcpy(wifi_config.sta.bssid, ap.bssid, 6);
+                ESP_LOGI(TAG, "Matched scanned AP %s on channel %d, RSSI %d, auth %d",
+                         ssid.c_str(), ap.primary, ap.rssi, ap.authmode);
+                break;
+            }
+        }
+    }
+
+    if (target_channel == 0) {
+        wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    }
+
+    wifi_config.sta.failure_retry_cnt = 3;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+
     // Upper-level retry loop with delay between attempts.
-    constexpr int kMaxAttempts = 2;
-    constexpr int kRetryDelayMs = 3000;
+    constexpr int kMaxAttempts = 3;
+    constexpr int kRetryDelayMs = 2000;
     bool connected = false;
 
     for (int attempt = 1; attempt <= kMaxAttempts && !connected; ++attempt) {
         if (attempt > 1) {
             ESP_LOGI(TAG,
-                "WiFi attempt %d/%d after %d ms delay "
-                "(waiting for AP comeback timer + state settle)",
+                "WiFi attempt %d/%d after %d ms delay",
                 attempt, kMaxAttempts, kRetryDelayMs);
             vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
         }
 
         xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
         esp_wifi_scan_stop();
-
-        wifi_config_t wifi_config;
-        bzero(&wifi_config, sizeof(wifi_config));
-        size_t ssid_len = ssid.size();
-        if (ssid_len > sizeof(wifi_config.sta.ssid)) {
-            ssid_len = sizeof(wifi_config.sta.ssid);
-        }
-        memcpy(wifi_config.sta.ssid, ssid.data(), ssid_len);
-
-        size_t password_len = password.size();
-        if (password_len > sizeof(wifi_config.sta.password)) {
-            password_len = sizeof(wifi_config.sta.password);
-        }
-        memcpy(wifi_config.sta.password, password.data(), password_len);
-        wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-        wifi_config.sta.failure_retry_cnt = 1;
 
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         auto ret = esp_wifi_connect();
@@ -792,17 +858,13 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         ESP_LOGI(TAG, "Connecting to WiFi %s (attempt %d/%d)",
             ssid.c_str(), attempt, kMaxAttempts);
 
-        // Wait for the connection to complete for 10 or 25 seconds.
+        // Wait up to 15 seconds for connection
         EventBits_t bits = xEventGroupWaitBits(
             event_group_,
             WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
             pdTRUE,
             pdFALSE,
-#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
-            pdMS_TO_TICKS(25000)
-#else
-            pdMS_TO_TICKS(10000)
-#endif
+            pdMS_TO_TICKS(15000)
         );
 
         if (bits & WIFI_CONNECTED_BIT) {
@@ -815,7 +877,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
             ESP_LOGW(TAG,
                 "Attempt %d/%d %s%s",
                 attempt, kMaxAttempts,
-                timed_out ? "timed out (driver may still be connecting)" : "failed",
+                timed_out ? "timed out" : "failed",
                 attempt < kMaxAttempts ? " — will retry" : "");
         }
     }
@@ -839,18 +901,31 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     }
 }
 
-bool WifiConfigurationAp::ConnectToPisoWifi(const std::string &ssid, const std::string &password, std::string &out_gateway)
+bool WifiConfigurationAp::ConnectToPisoWifi(const std::string &ssid, const std::string &password, std::string &out_gateway, const std::string &clone_mac)
 {
     piso_ssid_ = ssid;
     piso_password_ = password;
     in_piso_mode_ = true;
+
+    // Optional MAC cloning
+    if (!clone_mac.empty()) {
+        uint8_t mac[6];
+        if (sscanf(clone_mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                   &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+            esp_wifi_set_mac(WIFI_IF_STA, mac);
+            ESP_LOGI(TAG, "Cloned STA MAC address to %s", clone_mac.c_str());
+            piso_mac_ = clone_mac;
+        }
+    } else {
+        piso_mac_ = GetStaMac();
+    }
 
     if (!ConnectToWifi(ssid, password, true /* keep_connected */)) {
         in_piso_mode_ = false;
         return false;
     }
 
-    esp_netif_t* sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t* sta_netif = sta_netif_ ? sta_netif_ : esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (!sta_netif) {
         ESP_LOGE(TAG, "WIFI_STA_DEF not found");
         return false;
@@ -858,7 +933,7 @@ bool WifiConfigurationAp::ConnectToPisoWifi(const std::string &ssid, const std::
 
     esp_netif_ip_info_t ip_info;
     memset(&ip_info, 0, sizeof(ip_info));
-    int retry = 20; // wait up to 10 seconds
+    int retry = 30; // wait up to 15 seconds
     while (retry-- > 0) {
         if (esp_netif_get_ip_info(sta_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
             break;
@@ -933,9 +1008,15 @@ void WifiConfigurationAp::WifiEventHandler(void* arg, esp_event_base_t event_bas
         wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
         ESP_LOGI(TAG, "Station " MACSTR " left, AID=%d", MAC2STR(event->mac), event->aid);
     } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+        wifi_event_sta_connected_t* ev = (wifi_event_sta_connected_t*) event_data;
+        ESP_LOGI(TAG, "STA connected to SSID %s, channel %d!", ev ? (char*)ev->ssid : "", ev ? ev->channel : 0);
         xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
+        wifi_event_sta_disconnected_t* dis = (wifi_event_sta_disconnected_t*) event_data;
+        ESP_LOGW(TAG, "STA disconnected, reason: %d", dis ? dis->reason : 0);
+        if (self->is_connecting_) {
+            xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
+        }
     } else if (event_id == WIFI_EVENT_SCAN_DONE) {
         std::lock_guard<std::mutex> lock(self->mutex_);
         uint16_t ap_num = 0;
@@ -1067,6 +1148,10 @@ void WifiConfigurationAp::Stop() {
     if (ap_netif_) {
         esp_netif_destroy_default_wifi(ap_netif_);
         ap_netif_ = nullptr;
+    }
+    if (sta_netif_) {
+        esp_netif_destroy_default_wifi(sta_netif_);
+        sta_netif_ = nullptr;
     }
 
     ESP_LOGI(TAG, "Wifi configuration AP stopped");

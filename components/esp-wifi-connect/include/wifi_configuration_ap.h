@@ -43,12 +43,13 @@ public:
     void StartSmartConfig();
 #endif
     bool ConnectToWifi(const std::string &ssid, const std::string &password, bool keep_connected = false);
-    bool ConnectToPisoWifi(const std::string &ssid, const std::string &password, std::string &out_gateway);
+    bool ConnectToPisoWifi(const std::string &ssid, const std::string &password, std::string &out_gateway, const std::string &clone_mac = "");
     void CompletePisoWifi();
     void Save(const std::string &ssid, const std::string &password);
     std::vector<wifi_ap_record_t> GetAccessPoints();
     std::string GetSsid();
     std::string GetWebServerUrl();
+    std::string GetStaMac();
 
     /**
      * Set callback for when exit is requested from config mode
@@ -68,6 +69,7 @@ private:
     esp_timer_handle_t scan_timer_ = nullptr;
     bool is_connecting_ = false;
     esp_netif_t* ap_netif_ = nullptr;
+    esp_netif_t* sta_netif_ = nullptr;
     std::vector<wifi_ap_record_t> ap_records_;
     uint8_t last_connected_channel_ = 0;
 
@@ -82,6 +84,7 @@ private:
     std::string piso_ssid_;
     std::string piso_password_;
     std::string piso_gateway_;
+    std::string piso_mac_;
     bool in_piso_mode_ = false;
 
     // Callbacks
