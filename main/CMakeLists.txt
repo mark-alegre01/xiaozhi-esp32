@@ -1115,6 +1115,8 @@ idf_component_register(SRCS ${SOURCES}
                         bt
                         fatfs
                         xiaozhi-fonts
+                        nvs_flash
+                        esp-wifi-connect
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 
