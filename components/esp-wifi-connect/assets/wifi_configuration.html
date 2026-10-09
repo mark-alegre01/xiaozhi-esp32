@@ -525,10 +525,14 @@
             
             <div style="background: var(--surface-muted); padding: 14px; border-radius: var(--radius-sm); text-align: left; margin-bottom: 14px; font-size: 13px; line-height: 1.5; border: 1px solid var(--border);">
                 <div style="font-weight: 700; margin-bottom: 6px; color: var(--text);">How to activate:</div>
-                <div style="margin-bottom: 5px;">1. Tap <b>"Open Dashboard"</b> below to launch the Piso Wi-Fi portal.</div>
-                <div style="margin-bottom: 5px;">2. Verify the <b>Status MAC</b> on the portal matches the MAC shown above.</div>
-                <div style="margin-bottom: 5px;">3. Tap <b>"INSERT COIN"</b> or type voucher code and connect.</div>
-                <div>4. Switch back to this screen and tap <b>"Done (Start Robot)"</b>.</div>
+                <div id="piso_cloned_hint" style="display: none; background: rgba(16,185,129,0.12); border: 1px solid #10b981; padding: 10px; border-radius: 6px; color: #10b981; font-weight: 600; margin-bottom: 8px;">
+                    🎉 MAC Cloned Successfully! Your paid device session is active. You do NOT need to open any portal or pay again. Just tap <b>"Done (Start Robot)"</b> below!
+                </div>
+                <div id="piso_manual_steps">
+                    <div style="margin-bottom: 5px;">1. Tap <b>"Open JuanFi Portal"</b> below to launch the Piso Wi-Fi portal.</div>
+                    <div style="margin-bottom: 5px;">2. Tap <b>"INSERT COIN"</b> or type voucher code and connect.</div>
+                    <div>3. Switch back to this screen and tap <b>"Done (Start Robot)"</b>.</div>
+                </div>
                 <div style="margin-top: 8px; color: #f43f5e; font-size: 11px;">
                     <i>💡 Tip: Keep connected to the robot hotspot. If using phone, turn off Mobile Data.</i>
                 </div>
@@ -1770,12 +1774,46 @@
             const gw = (typeof data === 'object') ? (data.gateway || '10.0.0.1') : data;
             const mac = (typeof data === 'object') ? (data.mac || '') : '';
             const gwUrl = gw.startsWith('http') ? gw : ('http://' + gw);
-            document.getElementById('piso_gw_display').textContent = gwUrl;
-            document.getElementById('piso_open_btn').href = gwUrl;
-            if (mac) {
-                document.getElementById('piso_mac_display').textContent = mac;
+
+            const gwDisplay = document.getElementById('piso_gw_display');
+            if (gwDisplay) gwDisplay.textContent = gwUrl;
+
+            const gwBtn = document.getElementById('piso_open_gw_btn');
+            if (gwBtn) {
+                gwBtn.href = gwUrl;
+                const gwTxt = document.getElementById('piso_gw_text');
+                if (gwTxt) gwTxt.textContent = gw;
             }
-            modal.classList.add('show');
+
+            const juanfiBtn = document.getElementById('piso_open_juanfi_btn');
+            if (juanfiBtn) {
+                juanfiBtn.href = 'http://10.0.0.1';
+            }
+
+            const legacyBtn = document.getElementById('piso_open_btn');
+            if (legacyBtn) {
+                legacyBtn.href = gwUrl;
+            }
+
+            const macDisplay = document.getElementById('piso_mac_display');
+            if (macDisplay && mac) {
+                macDisplay.textContent = mac;
+            }
+
+            const cloneInput = document.getElementById('clone_mac');
+            const clonedHint = document.getElementById('piso_cloned_hint');
+            const manualSteps = document.getElementById('piso_manual_steps');
+            if (cloneInput && cloneInput.value.trim().length > 0) {
+                if (clonedHint) clonedHint.style.display = 'block';
+                if (manualSteps) manualSteps.style.display = 'none';
+            } else {
+                if (clonedHint) clonedHint.style.display = 'none';
+                if (manualSteps) manualSteps.style.display = 'block';
+            }
+
+            if (modal) {
+                modal.classList.add('show');
+            }
         }
 
         async function finishPisoWifi() {
