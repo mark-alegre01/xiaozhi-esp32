@@ -11,7 +11,7 @@
 #include <esp_netif.h>
 #include <lwip/ip_addr.h>
 #if CONFIG_LWIP_IPV4_NAPT
-#include <lwip/napt.h>
+#include "esp_netif_napt.h"
 #endif
 #include <nvs.h>
 #include <nvs_flash.h>
