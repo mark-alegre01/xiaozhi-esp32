@@ -6,6 +6,8 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 
+struct RobotAnimation;
+
 class OledDisplay : public LvglDisplay {
 private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
@@ -24,16 +26,18 @@ private:
     const uint8_t* current_face_bitmap_ = nullptr;
     lv_timer_t* blink_timer_ = nullptr;
 
-    // Talking animation state
-    lv_timer_t* talking_timer_ = nullptr;
-    int mouth_frame_ = 0;
+    // Robot face animation engine (plays once on word/emotion trigger)
+    lv_timer_t* anim_timer_ = nullptr;
+    const RobotAnimation* active_anim_ = nullptr;
+    int anim_frame_idx_ = 0;
+    bool is_animating_ = false;
     bool is_speaking_ = false;
 
     void CreateRobotEyes(lv_obj_t* parent);
     void DrawFaceBitmap(const uint8_t* bitmap_1bit);
-    void DrawTalkFrame();
+    void PlayAnimationOnce(const RobotAnimation* anim);
+    static void AnimTimerCallback(lv_timer_t* timer);
     static void BlinkTimerCallback(lv_timer_t* timer);
-    static void TalkTimerCallback(lv_timer_t* timer);
 
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;

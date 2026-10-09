@@ -104,9 +104,9 @@ void OledDisplay::SetupUI() {
 }
 
 OledDisplay::~OledDisplay() {
-    if (talking_timer_ != nullptr) {
-        lv_timer_del(talking_timer_);
-        talking_timer_ = nullptr;
+    if (anim_timer_ != nullptr) {
+        lv_timer_del(anim_timer_);
+        anim_timer_ = nullptr;
     }
 
     if (content_ != nullptr) {
@@ -163,10 +163,16 @@ bool OledDisplay::Lock(int timeout_ms) { return lvgl_port_lock(timeout_ms); }
 void OledDisplay::Unlock() { lvgl_port_unlock(); }
 
 void OledDisplay::SetChatMessage(const char* role, const char* content) {
-    // Caption/subtitle display disabled for OLED — face is always shown
-    // No-op: do not hide face or show any text overlay
-    (void)role;
-    (void)content;
+    if (content == nullptr || content[0] == '\0') return;
+
+    DisplayLockGuard lock(this);
+    if (height_ == 64 && face_image_ != nullptr) {
+        // Detect emotion animation from words spoken by user or assistant
+        const RobotAnimation* anim = DetectAnimationFromText(content);
+        if (anim != nullptr) {
+            PlayAnimationOnce(anim);
+        }
+    }
 }
 
 void OledDisplay::SetStatus(const char* status) {
@@ -175,24 +181,16 @@ void OledDisplay::SetStatus(const char* status) {
 
     if (height_ != 64 || face_image_ == nullptr) return;
 
-    // Detect speaking state to start/stop talking mouth animation
     bool speaking = (status != nullptr && strstr(status, "peaking") != nullptr);
 
     DisplayLockGuard lock(this);
     if (speaking && !is_speaking_) {
         is_speaking_ = true;
-        mouth_frame_ = 0;
-        if (talking_timer_ == nullptr) {
-            talking_timer_ = lv_timer_create(TalkTimerCallback, 140, this);
-        }
     } else if (!speaking && is_speaking_) {
         is_speaking_ = false;
-        if (talking_timer_ != nullptr) {
-            lv_timer_del(talking_timer_);
-            talking_timer_ = nullptr;
+        if (!is_animating_) {
+            DrawFaceBitmap(oled_face_neutral);
         }
-        // Restore resting face
-        DrawFaceBitmap(current_face_bitmap_ ? current_face_bitmap_ : oled_face_neutral);
     }
 }
 
@@ -211,12 +209,23 @@ void OledDisplay::SetupUI_128x64() {
     /* Container */
     container_ = lv_obj_create(screen);
     lv_obj_set_size(container_, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_flex_flow(container_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_layout(container_, LV_LAYOUT_NONE, 0);
     lv_obj_set_style_pad_all(container_, 0, 0);
     lv_obj_set_style_border_width(container_, 0, 0);
-    lv_obj_set_style_pad_row(container_, 0, 0);
 
-    /* Layer 1: Top bar - for status icons */
+    /* Content — full 128x64 area for robot face */
+    content_ = lv_obj_create(container_);
+    lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_radius(content_, 0, 0);
+    lv_obj_set_style_pad_all(content_, 0, 0);
+    lv_obj_set_style_border_width(content_, 0, 0);
+    lv_obj_set_size(content_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_style_layout(content_, LV_LAYOUT_NONE, 0);
+    lv_obj_align(content_, LV_ALIGN_CENTER, 0, 0);
+
+    CreateRobotEyes(content_);
+
+    /* Layer 1: Top bar - floats transparently over the black margin at top */
     top_bar_ = lv_obj_create(container_);
     lv_obj_set_size(top_bar_, LV_HOR_RES, 16);
     lv_obj_set_style_radius(top_bar_, 0, 0);
@@ -227,6 +236,7 @@ void OledDisplay::SetupUI_128x64() {
     lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
 
     network_label_ = lv_label_create(top_bar_);
     lv_label_set_text(network_label_, "");
@@ -257,8 +267,8 @@ void OledDisplay::SetupUI_128x64() {
     lv_obj_set_style_border_width(status_bar_, 0, 0);
     lv_obj_set_style_pad_all(status_bar_, 0, 0);
     lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
-    lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);        // Overlap with top_bar_
+    lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
+    lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);
 
     notification_label_ = lv_label_create(status_bar_);
     lv_obj_set_width(notification_label_, LV_HOR_RES);
@@ -273,18 +283,6 @@ void OledDisplay::SetupUI_128x64() {
     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
     lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
-
-    /* Content — full 48px area for robot face, no text overlays */
-    content_ = lv_obj_create(container_);
-    lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_radius(content_, 0, 0);
-    lv_obj_set_style_pad_all(content_, 0, 0);
-    lv_obj_set_style_border_width(content_, 0, 0);
-    lv_obj_set_width(content_, LV_HOR_RES);
-    lv_obj_set_height(content_, 48);
-    lv_obj_set_style_layout(content_, LV_LAYOUT_NONE, 0);
-
-    CreateRobotEyes(content_);
 
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
@@ -400,7 +398,7 @@ void OledDisplay::CreateRobotEyes(lv_obj_t* parent) {
     current_face_bitmap_ = oled_face_neutral;
     DrawFaceBitmap(current_face_bitmap_);
 
-    // Periodic blinking animation every 3.5 seconds
+    // Periodic natural eye blinking animation every 3.5 seconds
     blink_timer_ = lv_timer_create(BlinkTimerCallback, 3500, this);
 }
 
@@ -408,8 +406,8 @@ void OledDisplay::DrawFaceBitmap(const uint8_t* bitmap_1bit) {
     if (!face_buffer_rgb565_ || !bitmap_1bit || !face_image_) return;
 
     for (int y = 0; y < OLED_FACE_HEIGHT; ++y) {
-        for (int byte_idx = 0; byte_idx < 16; ++byte_idx) {
-            uint8_t byte_val = bitmap_1bit[y * 16 + byte_idx];
+        for (int byte_idx = 0; byte_idx < (OLED_FACE_WIDTH / 8); ++byte_idx) {
+            uint8_t byte_val = bitmap_1bit[y * (OLED_FACE_WIDTH / 8) + byte_idx];
             for (int bit = 0; bit < 8; ++bit) {
                 int x = byte_idx * 8 + bit;
                 bool is_lit = (byte_val & (1 << (7 - bit))) != 0;
@@ -422,38 +420,53 @@ void OledDisplay::DrawFaceBitmap(const uint8_t* bitmap_1bit) {
     lv_obj_invalidate(face_image_);
 }
 
+void OledDisplay::PlayAnimationOnce(const RobotAnimation* anim) {
+    if (!anim || anim->frame_count <= 0 || !face_image_) return;
+
+    if (anim_timer_ != nullptr) {
+        lv_timer_del(anim_timer_);
+        anim_timer_ = nullptr;
+    }
+
+    active_anim_ = anim;
+    anim_frame_idx_ = 0;
+    is_animating_ = true;
+
+    // Show initial frame immediately
+    DrawFaceBitmap(active_anim_->frames[0]);
+
+    // Step through remaining frames
+    int interval = anim->frame_duration_ms > 0 ? anim->frame_duration_ms : 65;
+    anim_timer_ = lv_timer_create(AnimTimerCallback, interval, this);
+}
+
+void OledDisplay::AnimTimerCallback(lv_timer_t* timer) {
+    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
+    if (!self || !self->is_animating_ || !self->active_anim_) return;
+
+    self->anim_frame_idx_++;
+    if (self->anim_frame_idx_ < self->active_anim_->frame_count) {
+        self->DrawFaceBitmap(self->active_anim_->frames[self->anim_frame_idx_]);
+    } else {
+        // Finished playing single pass! Restore resting neutral GIF face
+        self->is_animating_ = false;
+        self->active_anim_ = nullptr;
+        if (self->anim_timer_ != nullptr) {
+            lv_timer_del(self->anim_timer_);
+            self->anim_timer_ = nullptr;
+        }
+        self->DrawFaceBitmap(oled_face_neutral);
+    }
+}
+
 void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
     auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->face_image_) return;
-    // Don't blink while speaking — talking animation takes over
-    if (self->is_speaking_) return;
+    // Do not blink if an animation is currently playing or speaking
+    if (self->is_animating_ || self->is_speaking_) return;
 
-    // Fast blink: draw blink frame
-    self->DrawFaceBitmap(oled_face_blink);
-
-    // Reopen eyes after 120ms
-    lv_timer_create([](lv_timer_t* t) {
-        auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(t));
-        if (self && self->face_image_ && !self->is_speaking_) {
-            self->DrawFaceBitmap(self->current_face_bitmap_ ? self->current_face_bitmap_ : oled_face_neutral);
-        }
-        lv_timer_del(t);
-    }, 120, self);
-}
-
-void OledDisplay::DrawTalkFrame() {
-    if (!face_image_) return;
-    // Use current emotion's eye rows (from current_face_bitmap_) combined with talk mouth
-    // For simplicity use talk frames which have neutral eyes + varying mouth
-    const uint8_t* frame = oled_talk_frames[mouth_frame_ % 4];
-    DrawFaceBitmap(frame);
-    mouth_frame_ = (mouth_frame_ + 1) % 4;
-}
-
-void OledDisplay::TalkTimerCallback(lv_timer_t* timer) {
-    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
-    if (!self || !self->face_image_ || !self->is_speaking_) return;
-    self->DrawTalkFrame();
+    // Smooth natural eye blink from the GIF (run6, 7 frames)
+    self->PlayAnimationOnce(&oled_anim_blink);
 }
 
 void OledDisplay::SetEmotion(const char* emotion) {
@@ -478,8 +491,12 @@ void OledDisplay::SetEmotion(const char* emotion) {
         return;
     }
 
-    current_face_bitmap_ = GetOledFaceBitmap(emotion);
-    DrawFaceBitmap(current_face_bitmap_);
+    if (!emotion || emotion[0] == '\0') return;
+
+    const RobotAnimation* anim = GetAnimationForEmotion(emotion);
+    if (anim != nullptr) {
+        PlayAnimationOnce(anim);
+    }
 }
 
 void OledDisplay::SetTheme(Theme* theme) {
