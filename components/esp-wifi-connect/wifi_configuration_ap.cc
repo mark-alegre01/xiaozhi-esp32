@@ -965,6 +965,15 @@ void WifiConfigurationAp::CompletePisoWifi()
 {
     ESP_LOGI(TAG, "CompletePisoWifi: saving %s", piso_ssid_.c_str());
     Save(piso_ssid_, piso_password_);
+    if (!piso_mac_.empty()) {
+        nvs_handle_t nvs;
+        if (nvs_open("wifi", NVS_READWRITE, &nvs) == ESP_OK) {
+            nvs_set_str(nvs, "clone_mac", piso_mac_.c_str());
+            nvs_commit(nvs);
+            nvs_close(nvs);
+            ESP_LOGI(TAG, "Saved clone_mac %s to NVS", piso_mac_.c_str());
+        }
+    }
     in_piso_mode_ = false;
 
     xTaskCreate([](void *ctx) {

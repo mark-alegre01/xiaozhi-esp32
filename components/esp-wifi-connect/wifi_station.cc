@@ -144,6 +144,23 @@ void WifiStation::Start() {
                                                         this,
                                                         &instance_got_ip_));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Restore cloned MAC if configured in NVS
+    nvs_handle_t nvs_mac;
+    if (nvs_open("wifi", NVS_READONLY, &nvs_mac) == ESP_OK) {
+        char clone_mac[24] = {0};
+        size_t len = sizeof(clone_mac);
+        if (nvs_get_str(nvs_mac, "clone_mac", clone_mac, &len) == ESP_OK && len > 0) {
+            uint8_t mac[6];
+            if (sscanf(clone_mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                       &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+                esp_wifi_set_mac(WIFI_IF_STA, mac);
+                ESP_LOGI(TAG, "Applied cloned STA MAC from NVS: %s", clone_mac);
+            }
+        }
+        nvs_close(nvs_mac);
+    }
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
     if (max_tx_power_ != 0) {

@@ -534,12 +534,17 @@
                 </div>
             </div>
 
-            <a id="piso_open_btn" href="http://10.0.0.1" target="_blank" class="piso-btn-open">
-                👉 Open Piso Wi-Fi Dashboard
-            </a>
+            <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
+                <a id="piso_open_juanfi_btn" href="http://10.0.0.1" target="_blank" class="piso-btn-open" style="background: #2563eb; text-decoration: none;">
+                    👉 Open JuanFi Portal (10.0.0.1)
+                </a>
+                <a id="piso_open_gw_btn" href="http://10.0.18.1" target="_blank" class="piso-btn-open" style="background: #475569; font-size: 13px; text-decoration: none;">
+                    🌐 Open Router Gateway (<span id="piso_gw_text">10.0.18.1</span>)
+                </a>
+            </div>
 
             <button type="button" id="piso_finish_btn" onclick="finishPisoWifi()" class="piso-btn-done">
-                ✅ Done Inserting Coins (Start Robot)
+                ✅ Done (Start Robot)
             </button>
         </div>
     </div>
