@@ -490,16 +490,16 @@ void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
 }
 
 // ── Speaking (talking mouth) animation ──────────────────────────────────────
-// Alternates neutral face with happy open-mouth frames to simulate talking.
-// Uses frames 8-12 of the happy animation (peak open-mouth phase).
+// Smooth natural talking mouth movement while preserving the robot's resting eyes.
+// Uses dedicated talking mouth frames: talk_0 (closed) -> talk_1 -> talk_2 -> talk_3 (open).
 void OledDisplay::StartSpeakingAnimation() {
     if (!face_image_) return;
     if (speak_timer_ != nullptr) return;  // already running
-    speak_frame_idx_ = 0;
-    // Show first talking frame immediately
-    DrawFaceBitmap(oled_anim_happy_frames[8]);
-    // Alternate every 150ms – fast enough to look like talking
-    speak_timer_ = lv_timer_create(SpeakTimerCallback, 150, this);
+    speak_frame_idx_ = 1;
+    // Show first speaking frame immediately (small open mouth)
+    DrawFaceBitmap(oled_talk_frames[1]);
+    // Cycle every 130ms – natural speaking cadence
+    speak_timer_ = lv_timer_create(SpeakTimerCallback, 130, this);
 }
 
 void OledDisplay::StopSpeakingAnimation() {
@@ -508,22 +508,18 @@ void OledDisplay::StopSpeakingAnimation() {
         speak_timer_ = nullptr;
     }
     speak_frame_idx_ = 0;
+    if (!is_animating_) {
+        DrawFaceBitmap(oled_face_neutral);
+    }
 }
 
 void OledDisplay::SpeakTimerCallback(lv_timer_t* timer) {
     auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->face_image_ || !self->is_speaking_) return;
 
-    // Cycle 4 frames: closed, open1, open2, open3 to animate talking
-    // Frame sequence: neutral, happy[8], neutral, happy[10]
-    static const uint8_t* const kTalkFrames[] = {
-        oled_face_neutral,
-        oled_anim_happy_frames[8],
-        oled_face_neutral,
-        oled_anim_happy_frames[10],
-    };
-    constexpr int kTalkFrameCount = 4;
-    self->DrawFaceBitmap(kTalkFrames[self->speak_frame_idx_ % kTalkFrameCount]);
+    // Smooth mouth cycle: resting -> small -> medium -> wide -> medium -> small
+    constexpr int kTalkFrameCount = 6;
+    self->DrawFaceBitmap(oled_talk_frames[self->speak_frame_idx_ % kTalkFrameCount]);
     self->speak_frame_idx_++;
     if (self->speak_frame_idx_ >= kTalkFrameCount * 8) {
         self->speak_frame_idx_ = 0;  // wrap without overflow

@@ -192,8 +192,11 @@ bool RadioPlayer::Play(const std::string& input_url, const std::string& station_
         if (!station_name.empty() && station_name != "Radio") {
             return PlaySong(station_name);
         }
-        resolved_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
-        resolved_name = "Love Radio 90.7";
+        if (!input_url.empty()) {
+            return PlaySong(input_url);
+        }
+        ESP_LOGW(TAG, "No valid radio station or song query provided");
+        return false;
     }
 
     // Store new stream and signal any running worker to stop.
@@ -389,10 +392,16 @@ void RadioPlayer::WorkerTask() {
                     bridge_host = new_host;
                 }
                 search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
-                opened = http_search->Open("GET", search_url).has_value();
+                http_search = Board::GetInstance().GetNetwork()->CreateHttp(3);
+                if (http_search) {
+                    http_search->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
+                    http_search->SetHeader("Accept", "application/json");
+                    http_search->SetTimeout(15000);
+                    opened = http_search->Open("GET", search_url).has_value();
+                }
             }
 
-            if (opened) {
+            if (opened && http_search) {
                 auto status = http_search->GetStatusCode();
                 if (status && *status >= 200 && *status < 300) {
                     std::string body;
@@ -420,7 +429,9 @@ void RadioPlayer::WorkerTask() {
                     }
                 }
             }
-            http_search->Close();
+            if (http_search) {
+                http_search->Close();
+            }
         }
 
         if (stop_requested_.load()) {
@@ -428,12 +439,12 @@ void RadioPlayer::WorkerTask() {
         }
 
         if (!found || stream_url.empty()) {
-            ESP_LOGW(TAG, "Bridge offline or song not found: '%s'. Falling back to Live Radio.", search_query.c_str());
+            ESP_LOGW(TAG, "Bridge offline or song not found: '%s'", search_query.c_str());
             if (display) {
-                display->ShowNotification("Live Radio OPM", 3000);
+                display->ShowNotification("Song Not Found", 3000);
+                display->SetStatus("Ready");
             }
-            stream_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
-            display_name = "Love Radio 90.7";
+            goto cleanup;
         }
 
         {
