@@ -196,6 +196,34 @@ private:
             });
 
         mcp.AddTool(
+            "self.music.toggle_lyrics",
+            "Show or hide synchronized song lyrics on the robot display. "
+            "Call this when the user says 'show lyrics', 'display lyrics', 'what are the lyrics', or 'hide lyrics'. "
+            "Pass action='show' to display lyrics, or action='hide' to hide them and restore the robot face.",
+            PropertyList({
+                Property("action", kPropertyTypeString, std::string("show"))
+            }),
+            [](const PropertyList& props) -> ToolResult {
+                auto action = props["action"].value<std::string>();
+                auto& player = RadioPlayer::GetInstance();
+                if (!player.IsPlaying()) {
+                    return std::unexpected("No song is currently playing");
+                }
+                bool show = (action != "hide");
+                if (show) {
+                    player.ShowLyrics();  // blocks until lyrics fetched (ok: MCP thread)
+                    if (player.IsLyricsEnabled()) {
+                        return std::string("Lyrics are now showing on the display");
+                    } else {
+                        return std::unexpected("No lyrics found for this song");
+                    }
+                } else {
+                    player.HideLyrics();
+                    return std::string("Lyrics hidden, robot face restored");
+                }
+            });
+
+        mcp.AddTool(
             "self.music.stop",
             "Stop the currently playing music, song, or audio stream.",
             PropertyList(),

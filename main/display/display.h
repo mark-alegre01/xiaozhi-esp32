@@ -51,6 +51,10 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual void SetMusicPlaying(bool playing) { (void)playing; }  // Override in OledDisplay
+    virtual void SetLyricsMode(bool on) { (void)on; }  // Override in OledDisplay
+    virtual void SetLyricsLine(const char* prev, const char* current, const char* next) {
+        (void)prev; (void)current; (void)next;
+    }
     virtual bool AddTextGlyphs(const std::vector<TextGlyph>& glyphs, uint8_t bpp) { return false; }
     virtual void ClearTextGlyphs() {}
     virtual void SetEmojiCollection(std::shared_ptr<EmojiCollection>) {}

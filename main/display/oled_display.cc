@@ -592,6 +592,89 @@ void OledDisplay::SetMusicPlaying(bool playing) {
     }
 }
 
+void OledDisplay::SetLyricsMode(bool on) {
+    if (height_ != 64) return;
+    DisplayLockGuard lock(this);
+
+    if (on == is_lyrics_mode_) return;
+    is_lyrics_mode_ = on;
+
+    if (on) {
+        // Pause music animation while lyrics are showing
+        StopMusicAnimation();
+
+        // Build full-screen lyrics overlay on top of content_
+        if (lyrics_overlay_ == nullptr) {
+            auto screen = lv_screen_active();
+            auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+            const lv_font_t* text_font = lvgl_theme->text_font()->font();
+
+            lyrics_overlay_ = lv_obj_create(screen);
+            lv_obj_set_size(lyrics_overlay_, LV_HOR_RES, LV_VER_RES);
+            lv_obj_set_style_bg_color(lyrics_overlay_, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(lyrics_overlay_, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(lyrics_overlay_, 0, 0);
+            lv_obj_set_style_pad_all(lyrics_overlay_, 2, 0);
+            lv_obj_set_style_radius(lyrics_overlay_, 0, 0);
+            lv_obj_set_scrollbar_mode(lyrics_overlay_, LV_SCROLLBAR_MODE_OFF);
+            lv_obj_set_style_layout(lyrics_overlay_, LV_LAYOUT_FLEX, 0);
+            lv_obj_set_flex_flow(lyrics_overlay_, LV_FLEX_FLOW_COLUMN);
+            lv_obj_set_flex_align(lyrics_overlay_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+            // Previous line (dimmed)
+            lyrics_label_prev_ = lv_label_create(lyrics_overlay_);
+            lv_obj_set_width(lyrics_label_prev_, LV_HOR_RES - 4);
+            lv_obj_set_style_text_font(lyrics_label_prev_, text_font, 0);
+            lv_obj_set_style_text_align(lyrics_label_prev_, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_color(lyrics_label_prev_, lv_color_make(0x80, 0x80, 0x80), 0);
+            lv_label_set_long_mode(lyrics_label_prev_, LV_LABEL_LONG_DOT);
+            lv_label_set_text(lyrics_label_prev_, "");
+
+            // Current line (highlighted / inverted)
+            lyrics_label_curr_ = lv_label_create(lyrics_overlay_);
+            lv_obj_set_width(lyrics_label_curr_, LV_HOR_RES - 4);
+            lv_obj_set_style_text_font(lyrics_label_curr_, text_font, 0);
+            lv_obj_set_style_text_align(lyrics_label_curr_, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_color(lyrics_label_curr_, lv_color_white(), 0);
+            lv_obj_set_style_bg_color(lyrics_label_curr_, lv_color_white(), 0);
+            lv_obj_set_style_bg_opa(lyrics_label_curr_, LV_OPA_20, 0);  // subtle highlight
+            lv_obj_set_style_radius(lyrics_label_curr_, 2, 0);
+            lv_obj_set_style_pad_hor(lyrics_label_curr_, 2, 0);
+            lv_label_set_long_mode(lyrics_label_curr_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+            lv_label_set_text(lyrics_label_curr_, "Loading...");
+
+            // Next line (dimmed)
+            lyrics_label_next_ = lv_label_create(lyrics_overlay_);
+            lv_obj_set_width(lyrics_label_next_, LV_HOR_RES - 4);
+            lv_obj_set_style_text_font(lyrics_label_next_, text_font, 0);
+            lv_obj_set_style_text_align(lyrics_label_next_, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_color(lyrics_label_next_, lv_color_make(0x80, 0x80, 0x80), 0);
+            lv_label_set_long_mode(lyrics_label_next_, LV_LABEL_LONG_DOT);
+            lv_label_set_text(lyrics_label_next_, "");
+        }
+        lv_obj_clear_flag(lyrics_overlay_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        // Hide overlay, restore music animation
+        if (lyrics_overlay_ != nullptr) {
+            lv_obj_add_flag(lyrics_overlay_, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (is_music_playing_ && !is_speaking_) {
+            StartMusicAnimation();
+        } else if (!is_speaking_ && !is_animating_) {
+            DrawFaceBitmap(oled_face_neutral);
+        }
+    }
+}
+
+void OledDisplay::SetLyricsLine(const char* prev, const char* current, const char* next) {
+    if (!is_lyrics_mode_ || lyrics_overlay_ == nullptr) return;
+    DisplayLockGuard lock(this);
+
+    if (lyrics_label_prev_ && prev)    lv_label_set_text(lyrics_label_prev_, prev[0] ? prev : " ");
+    if (lyrics_label_curr_ && current) lv_label_set_text(lyrics_label_curr_, current[0] ? current : " ");
+    if (lyrics_label_next_ && next)    lv_label_set_text(lyrics_label_next_, next[0] ? next : " ");
+}
+
 void OledDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
     if (height_ == 32) {

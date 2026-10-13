@@ -42,6 +42,13 @@ private:
     int music_frame_idx_ = 0;
     bool is_music_playing_ = false;
 
+    // Lyrics overlay (shown over the full 128x64 when lyrics mode is active)
+    lv_obj_t* lyrics_overlay_ = nullptr;
+    lv_obj_t* lyrics_label_prev_ = nullptr;
+    lv_obj_t* lyrics_label_curr_ = nullptr;
+    lv_obj_t* lyrics_label_next_ = nullptr;
+    bool is_lyrics_mode_ = false;
+
     void CreateRobotEyes(lv_obj_t* parent);
     void DrawFaceBitmap(const uint8_t* bitmap_1bit);
     void PlayAnimationOnce(const RobotAnimation* anim);
@@ -73,6 +80,8 @@ public:
     virtual bool IsMonochrome() const override { return true; }
     void SetPowerSaveMode(bool on) override;
     void SetMusicPlaying(bool playing);
+    virtual void SetLyricsMode(bool on) override;
+    virtual void SetLyricsLine(const char* prev, const char* current, const char* next) override;
 };
 
 #endif  // OLED_DISPLAY_H

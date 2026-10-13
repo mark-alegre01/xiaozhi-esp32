@@ -333,6 +333,14 @@ void RadioPlayer::Stop() {
         display->ShowNotification("Stopped", 2000);
         display->SetStatus("Ready");
         display->SetMusicPlaying(false);  // Stop music animation
+        display->SetLyricsMode(false);    // Hide lyrics overlay if active
+    }
+    // Clear lyrics state
+    lyrics_enabled_.store(false);
+    {
+        std::lock_guard<std::mutex> lock2(mutex_);
+        lyrics_lines_.clear();
+        lyrics_video_id_.clear();
     }
     ESP_LOGI(TAG, "Radio stop signalled; worker will clean up asynchronously");
 }
@@ -421,11 +429,17 @@ void RadioPlayer::WorkerTask() {
                         cJSON* status_item = cJSON_GetObjectItem(root, "status");
                         cJSON* title_item = cJSON_GetObjectItem(root, "title");
                         cJSON* url_item = cJSON_GetObjectItem(root, "stream_url");
+                        cJSON* id_item = cJSON_GetObjectItem(root, "id");
                         if (status_item && cJSON_IsString(status_item) && strcmp(status_item->valuestring, "ok") == 0 &&
                             url_item && cJSON_IsString(url_item) && strlen(url_item->valuestring) > 0) {
                             stream_url = url_item->valuestring;
                             if (title_item && cJSON_IsString(title_item)) {
                                 display_name = title_item->valuestring;
+                            }
+                            // Save video ID for on-demand lyrics fetch
+                            if (id_item && cJSON_IsString(id_item)) {
+                                std::lock_guard<std::mutex> lk(mutex_);
+                                lyrics_video_id_ = id_item->valuestring;
                             }
                             found = true;
                         }
@@ -563,6 +577,9 @@ void RadioPlayer::WorkerTask() {
             display->SetStatus("Playing");
             display->SetMusicPlaying(true);  // Show music animation on OLED
         }
+
+        // Reset elapsed time at playback start
+        elapsed_ms_.store(0);
 
         // Lock output on speaker so idle timer doesn't disable I2S TX
         if (codec_ != nullptr) {
@@ -715,6 +732,18 @@ void RadioPlayer::WorkerTask() {
                                  (unsigned)out_frame.decoded_size);
                     }
 
+                    // Track elapsed playback time for lyric sync
+                    if (info.sample_rate > 0 && out_frame.decoded_size > 0) {
+                        int bytes_per_sample = sizeof(int16_t) * (info.channel >= 2 ? 2 : 1);
+                        uint32_t num_samples = out_frame.decoded_size / bytes_per_sample;
+                        uint32_t ms_this_frame = (num_samples * 1000) / info.sample_rate;
+                        elapsed_ms_.fetch_add(ms_this_frame);
+                        // If lyrics are enabled, push the current line to the display
+                        if (lyrics_enabled_.load()) {
+                            UpdateLyricsDisplay();
+                        }
+                    }
+
                     std::vector<int16_t> mono_pcm;
                     if (info.channel >= 2) {
                         size_t n = out_frame.decoded_size / (sizeof(int16_t) * 2);
@@ -837,6 +866,174 @@ cleanup:
 
     ESP_LOGI(TAG, "Radio worker task finished");
     vTaskDelete(nullptr);
+}
+
+// ── Lyrics: Fetch from bridge /lyrics and store parsed lines ─────────────────
+void RadioPlayer::FetchAndStoreLyrics(const std::string& video_id, const std::string& title, const std::string& query) {
+    std::string bridge_host = GetBridgeHost();
+    int bridge_port = MUSIC_BRIDGE_PORT;
+
+    // Build URL: prefer video_id, fall back to title/query
+    std::string lyrics_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/lyrics?";
+    if (!video_id.empty()) {
+        std::string enc_v;
+        for (char c : video_id) {
+            if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') enc_v += c;
+            else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c); enc_v += hex; }
+        }
+        lyrics_url += "v=" + enc_v;
+    } else {
+        std::string src = title.empty() ? query : title;
+        std::string enc;
+        for (char c : src) {
+            if (c == ' ') enc += "+";
+            else if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.') enc += c;
+            else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c); enc += hex; }
+        }
+        lyrics_url += "q=" + enc;
+    }
+
+    ESP_LOGI(TAG, "Fetching lyrics from: %s", lyrics_url.c_str());
+
+    auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+    if (!http) return;
+    http->SetTimeout(8000);
+    http->SetHeader("User-Agent", "XiaozhiRobot/1.0");
+    http->SetHeader("Accept", "application/json");
+
+    if (!http->Open("GET", lyrics_url).has_value()) {
+        http->Close();
+        ESP_LOGW(TAG, "Failed to open lyrics URL");
+        return;
+    }
+
+    auto http_status = http->GetStatusCode();
+    if (!http_status || *http_status < 200 || *http_status >= 300) {
+        http->Close();
+        ESP_LOGW(TAG, "Lyrics HTTP status: %d", http_status ? *http_status : -1);
+        return;
+    }
+
+    std::string body;
+    char buf[512];
+    while (body.size() < 32768) {
+        auto rd = http->Read(buf, sizeof(buf) - 1);
+        if (!rd || *rd == 0) break;
+        buf[*rd] = '\0';
+        body.append(buf, *rd);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (!root) { ESP_LOGW(TAG, "Lyrics JSON parse failed"); return; }
+
+    cJSON* status_j = cJSON_GetObjectItem(root, "status");
+    cJSON* lines_j  = cJSON_GetObjectItem(root, "lines");
+
+    if (status_j && cJSON_IsString(status_j) && strcmp(status_j->valuestring, "ok") == 0 &&
+        lines_j && cJSON_IsArray(lines_j)) {
+        cJSON* track_j = cJSON_GetObjectItem(root, "track");
+        const char* track_name = (track_j && cJSON_IsString(track_j)) ? track_j->valuestring : "";
+        int arr_size = cJSON_GetArraySize(lines_j);
+        ESP_LOGI(TAG, "Lyrics fetched: track='%s' lines=%d", track_name, arr_size);
+
+        std::vector<LyricLine> new_lines;
+        new_lines.reserve(arr_size);
+        for (int i = 0; i < arr_size; i++) {
+            cJSON* item = cJSON_GetArrayItem(lines_j, i);
+            cJSON* ms_j = cJSON_GetObjectItem(item, "ms");
+            cJSON* t_j  = cJSON_GetObjectItem(item, "t");
+            if (ms_j && cJSON_IsNumber(ms_j) && t_j && cJSON_IsString(t_j)) {
+                new_lines.push_back({ (int)ms_j->valuedouble, std::string(t_j->valuestring) });
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            lyrics_lines_ = std::move(new_lines);
+        }
+        ESP_LOGI(TAG, "Stored %u lyric lines", (unsigned)lyrics_lines_.size());
+    } else {
+        ESP_LOGW(TAG, "No lyrics found or bad response");
+    }
+    cJSON_Delete(root);
+}
+
+int RadioPlayer::GetCurrentLyricIndex() const {
+    if (lyrics_lines_.empty()) return -1;
+    uint32_t now_ms = elapsed_ms_.load();
+    int idx = -1;
+    for (int i = 0; i < (int)lyrics_lines_.size(); i++) {
+        if ((uint32_t)lyrics_lines_[i].ms <= now_ms) idx = i;
+        else break;
+    }
+    return idx;
+}
+
+void RadioPlayer::UpdateLyricsDisplay() {
+    // Throttle: only update every ~400 ms to avoid spamming LVGL lock
+    static uint32_t last_update_ms = 0;
+    uint32_t now = elapsed_ms_.load();
+    if (now < last_update_ms + 400 && now >= last_update_ms) return;
+    last_update_ms = now;
+
+    int idx = GetCurrentLyricIndex();
+    if (idx < 0) return;
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (!display) return;
+
+    display->SetLyricsLine(
+        idx > 0 ? lyrics_lines_[idx - 1].text.c_str() : "",
+        lyrics_lines_[idx].text.c_str(),
+        (idx + 1 < (int)lyrics_lines_.size()) ? lyrics_lines_[idx + 1].text.c_str() : ""
+    );
+}
+
+void RadioPlayer::ShowLyrics() {
+    if (!is_playing_.load()) {
+        ESP_LOGW(TAG, "ShowLyrics: nothing is playing");
+        return;
+    }
+
+    std::string video_id, title, query;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        video_id = lyrics_video_id_;
+        title = station_name_;
+        query = station_name_;
+        lyrics_lines_.clear();  // clear stale lyrics
+    }
+
+    lyrics_enabled_.store(true);
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->SetLyricsMode(true);
+        display->ShowNotification("Loading lyrics...", 2000);
+    }
+
+    FetchAndStoreLyrics(video_id, title, query);
+
+    if (lyrics_lines_.empty()) {
+        ESP_LOGW(TAG, "ShowLyrics: no lyrics found for '%s'", title.c_str());
+        lyrics_enabled_.store(false);
+        if (display) {
+            display->SetLyricsMode(false);
+            display->ShowNotification("No lyrics found", 2500);
+        }
+    }
+}
+
+void RadioPlayer::HideLyrics() {
+    lyrics_enabled_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lyrics_lines_.clear();
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->SetLyricsMode(false);
+    }
 }
 
 std::string RadioPlayer::SearchStationsOnline(const std::string& query) {
