@@ -472,7 +472,24 @@ void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t
     esp_ip4addr_ntoa(&event->ip_info.ip, ip_address, sizeof(ip_address));
     this_->ip_address_ = ip_address;
     ESP_LOGI(TAG, "Got IP: %s", this_->ip_address_.c_str());
-    
+
+    // Override DHCP-provided DNS with Google's public resolvers so that
+    // external hostnames (api.tenclass.net etc.) always resolve correctly
+    // even when the home router advertises a broken or filtering DNS server.
+    if (this_->station_netif_) {
+        esp_netif_dns_info_t dns_primary = {};
+        dns_primary.ip.u_addr.ip4.addr = esp_ip4addr_aton("8.8.8.8");
+        dns_primary.ip.type = ESP_IPADDR_TYPE_V4;
+        esp_netif_set_dns_info(this_->station_netif_, ESP_NETIF_DNS_MAIN, &dns_primary);
+
+        esp_netif_dns_info_t dns_secondary = {};
+        dns_secondary.ip.u_addr.ip4.addr = esp_ip4addr_aton("8.8.4.4");
+        dns_secondary.ip.type = ESP_IPADDR_TYPE_V4;
+        esp_netif_set_dns_info(this_->station_netif_, ESP_NETIF_DNS_BACKUP, &dns_secondary);
+
+        ESP_LOGI(TAG, "Overrode DNS to 8.8.8.8 / 8.8.4.4");
+    }
+
     xEventGroupSetBits(this_->event_group_, WIFI_EVENT_CONNECTED);
     this_->was_connected_ = true;  // Mark as connected for disconnect notification
     if (this_->on_connected_) {
