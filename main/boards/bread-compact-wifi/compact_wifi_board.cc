@@ -449,14 +449,9 @@ private:
             "Send a message, note, reminder, or response to the user's Telegram chat. "
             "Call this tool when the user says 'send to my telegram', 'message me on telegram', "
             "'telegram me this', 'send a telegram', or asks to forward/save text or notes to Telegram.",
-            PropertyList({Property("message", kPropertyTypeString, "The message text or note to send to Telegram")}),
+            PropertyList({Property("message", kPropertyTypeString)}),
             [](const PropertyList& props) -> ToolResult {
-                std::string message;
-                for (const auto& p : props) {
-                    if (p.name == "message" && !p.value.empty()) {
-                        message = p.value;
-                    }
-                }
+                auto message = props["message"].value<std::string>();
                 if (message.empty()) {
                     return std::unexpected("No message text provided.");
                 }
