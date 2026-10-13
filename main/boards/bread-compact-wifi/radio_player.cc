@@ -78,16 +78,21 @@ void RadioPlayer::DiscoverBridge() {
 
     struct timeval tv;
     tv.tv_sec = 1;
-    tv.tv_usec = 200000;
+    tv.tv_usec = 500000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    const char* msg = "XIAOZHI_DISCOVER";
+
+    // Broadcast to global subnet
     struct sockaddr_in dest_addr;
     memset(&dest_addr, 0, sizeof(dest_addr));
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(8088);
     dest_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(sock, msg, strlen(msg), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
 
-    const char* msg = "XIAOZHI_DISCOVER";
+    // Also broadcast to 192.168.1.255
+    dest_addr.sin_addr.s_addr = inet_addr("192.168.1.255");
     sendto(sock, msg, strlen(msg), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
 
     char rx_buffer[128];
@@ -371,10 +376,11 @@ void RadioPlayer::WorkerTask() {
         if (http_search) {
             http_search->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
             http_search->SetHeader("Accept", "application/json");
-            http_search->SetTimeout(12000);
+            http_search->SetTimeout(15000);
 
             bool opened = http_search->Open("GET", search_url).has_value();
             if (!opened) {
+                http_search->Close();
                 ESP_LOGI(TAG, "Direct connect to bridge at %s failed, attempting UDP discovery...", bridge_host.c_str());
                 DiscoverBridge();
                 std::string new_host = GetBridgeHost();
@@ -421,13 +427,12 @@ void RadioPlayer::WorkerTask() {
         }
 
         if (!found || stream_url.empty()) {
-            ESP_LOGW(TAG, "Bridge offline or song not found: '%s'", search_query.c_str());
+            ESP_LOGW(TAG, "Bridge offline or song not found: '%s'. Falling back to Live Radio.", search_query.c_str());
             if (display) {
-                display->ShowNotification("Song Not Found", 4000);
-                display->SetStatus("Failed");
+                display->ShowNotification("Live Radio OPM", 3000);
             }
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            goto cleanup;
+            stream_url = "https://azura.loveradio.com.ph/listen/love_radio_manila/radio.mp3";
+            display_name = "Love Radio 90.7";
         }
 
         {
@@ -937,7 +942,7 @@ std::string RadioPlayer::PlaySongOrFallback(const std::string& query) {
         }
     }
 
-    std::string bridge_host = MUSIC_BRIDGE_HOST;
+    std::string bridge_host = GetBridgeHost();
     int bridge_port = MUSIC_BRIDGE_PORT;
     std::string search_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/search?q=" + encoded_query;
 
@@ -954,7 +959,7 @@ std::string RadioPlayer::PlaySongOrFallback(const std::string& query) {
     if (http) {
         http->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
         http->SetHeader("Accept", "application/json");
-        http->SetTimeout(6000);
+        http->SetTimeout(12000);
 
         if (auto opened = http->Open("GET", search_url); opened) {
             auto status = http->GetStatusCode();
@@ -1032,10 +1037,11 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
 
     http->SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) XiaozhiRobot/1.0");
     http->SetHeader("Accept", "application/json");
-    http->SetTimeout(4000);
+    http->SetTimeout(10000);
 
     bool opened = http->Open("GET", url).has_value();
     if (!opened) {
+        http->Close();
         ESP_LOGW(TAG, "Failed to connect to %s, attempting UDP discovery...", bridge_host.c_str());
         DiscoverBridge();
         std::string new_host = GetBridgeHost();
@@ -1048,7 +1054,7 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
 
     if (!opened) {
         http->Close();
-        return "Failed to connect to news service. Please ensure the local bridge is running.";
+        return "The local news bridge is currently offline. You can listen to live Philippine news radio by calling self.news.play_broadcast(station='DZRH')!";
     }
 
     auto status = http->GetStatusCode();
