@@ -621,34 +621,34 @@ void OledDisplay::SetLyricsMode(bool on) {
             lv_obj_set_flex_flow(lyrics_overlay_, LV_FLEX_FLOW_COLUMN);
             lv_obj_set_flex_align(lyrics_overlay_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-            // Previous line (dimmed)
+            // Previous line (white text on black)
             lyrics_label_prev_ = lv_label_create(lyrics_overlay_);
             lv_obj_set_width(lyrics_label_prev_, LV_HOR_RES - 4);
             lv_obj_set_style_text_font(lyrics_label_prev_, text_font, 0);
             lv_obj_set_style_text_align(lyrics_label_prev_, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_style_text_color(lyrics_label_prev_, lv_color_make(0x80, 0x80, 0x80), 0);
+            lv_obj_set_style_text_color(lyrics_label_prev_, lv_color_white(), 0);
             lv_label_set_long_mode(lyrics_label_prev_, LV_LABEL_LONG_DOT);
             lv_label_set_text(lyrics_label_prev_, "");
 
-            // Current line (highlighted / inverted)
+            // Current line (inverted bar: black text on solid white background for high contrast)
             lyrics_label_curr_ = lv_label_create(lyrics_overlay_);
             lv_obj_set_width(lyrics_label_curr_, LV_HOR_RES - 4);
             lv_obj_set_style_text_font(lyrics_label_curr_, text_font, 0);
             lv_obj_set_style_text_align(lyrics_label_curr_, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_style_text_color(lyrics_label_curr_, lv_color_white(), 0);
+            lv_obj_set_style_text_color(lyrics_label_curr_, lv_color_black(), 0);
             lv_obj_set_style_bg_color(lyrics_label_curr_, lv_color_white(), 0);
-            lv_obj_set_style_bg_opa(lyrics_label_curr_, LV_OPA_20, 0);  // subtle highlight
+            lv_obj_set_style_bg_opa(lyrics_label_curr_, LV_OPA_COVER, 0);
             lv_obj_set_style_radius(lyrics_label_curr_, 2, 0);
             lv_obj_set_style_pad_hor(lyrics_label_curr_, 2, 0);
             lv_label_set_long_mode(lyrics_label_curr_, LV_LABEL_LONG_SCROLL_CIRCULAR);
             lv_label_set_text(lyrics_label_curr_, "Loading...");
 
-            // Next line (dimmed)
+            // Next line (white text on black)
             lyrics_label_next_ = lv_label_create(lyrics_overlay_);
             lv_obj_set_width(lyrics_label_next_, LV_HOR_RES - 4);
             lv_obj_set_style_text_font(lyrics_label_next_, text_font, 0);
             lv_obj_set_style_text_align(lyrics_label_next_, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_style_text_color(lyrics_label_next_, lv_color_make(0x80, 0x80, 0x80), 0);
+            lv_obj_set_style_text_color(lyrics_label_next_, lv_color_white(), 0);
             lv_label_set_long_mode(lyrics_label_next_, LV_LABEL_LONG_DOT);
             lv_label_set_text(lyrics_label_next_, "");
         }

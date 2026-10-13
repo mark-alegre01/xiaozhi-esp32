@@ -248,14 +248,17 @@ bool RadioPlayer::PlaySong(const std::string& query) {
         return false;
     }
 
-    // Store new query and signal any running worker to stop.
-    // This function runs on the WebSocket event thread, so we must NOT block.
+    Http* http_to_close = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_search_query_ = query;
         url_ = "";
         station_name_ = query;
         stop_requested_.store(true);  // tells any running stream loop to exit
+        http_to_close = http_active_;
+    }
+    if (http_to_close != nullptr) {
+        http_to_close->Close();  // unblock any blocking Read() immediately
     }
 
     auto display = Board::GetInstance().GetDisplay();
@@ -842,14 +845,17 @@ cleanup:
 
     // Check if PlaySong() or Play() queued a new song/stream while we were streaming.
     // If so, restart the worker immediately instead of terminating.
+    bool has_new_work = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         current_playing_url_.clear();
-        if (!stop_requested_.load() && (!pending_search_query_.empty() || !url_.empty())) {
+        if (!pending_search_query_.empty() || !url_.empty()) {
             // A genuine new song or stream was queued — restart
+            has_new_work = true;
             stop_requested_.store(false);
             is_playing_.store(true);
-            ESP_LOGI(TAG, "Restarting worker for new stream/song");
+            ESP_LOGI(TAG, "Restarting worker for new stream/song: query='%s' url='%s'",
+                     pending_search_query_.c_str(), url_.c_str());
         } else {
             is_playing_.store(false);
             stop_requested_.store(false);
@@ -858,7 +864,7 @@ cleanup:
     }
 
     // If there's a new pending song/stream, re-enter the task body
-    if (is_playing_.load() && !stop_requested_.load()) {
+    if (has_new_work) {
         ESP_LOGI(TAG, "Re-entering WorkerTask for queued stream");
         WorkerTask();  // tail call
         return;  // vTaskDelete already called by recursive WorkerTask()
@@ -873,24 +879,32 @@ void RadioPlayer::FetchAndStoreLyrics(const std::string& video_id, const std::st
     std::string bridge_host = GetBridgeHost();
     int bridge_port = MUSIC_BRIDGE_PORT;
 
-    // Build URL: prefer video_id, fall back to title/query
+    auto url_encode = [](const std::string& str) -> std::string {
+        std::string out;
+        for (char c : str) {
+            if (c == ' ') out += "+";
+            else if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.') out += c;
+            else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c); out += hex; }
+        }
+        return out;
+    };
+
+    // Pass video_id, title, AND search query so bridge always has the exact song information
     std::string lyrics_url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/lyrics?";
+    bool first = true;
     if (!video_id.empty()) {
-        std::string enc_v;
-        for (char c : video_id) {
-            if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') enc_v += c;
-            else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c); enc_v += hex; }
-        }
-        lyrics_url += "v=" + enc_v;
-    } else {
-        std::string src = title.empty() ? query : title;
-        std::string enc;
-        for (char c : src) {
-            if (c == ' ') enc += "+";
-            else if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.') enc += c;
-            else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c); enc += hex; }
-        }
-        lyrics_url += "q=" + enc;
+        lyrics_url += "v=" + url_encode(video_id);
+        first = false;
+    }
+    if (!title.empty()) {
+        if (!first) lyrics_url += "&";
+        lyrics_url += "title=" + url_encode(title);
+        first = false;
+    }
+    if (!query.empty()) {
+        if (!first) lyrics_url += "&";
+        lyrics_url += "q=" + url_encode(query);
+        first = false;
     }
 
     ESP_LOGI(TAG, "Fetching lyrics from: %s", lyrics_url.c_str());
@@ -970,17 +984,23 @@ int RadioPlayer::GetCurrentLyricIndex() const {
 }
 
 void RadioPlayer::UpdateLyricsDisplay() {
-    // Throttle: only update every ~400 ms to avoid spamming LVGL lock
+    // Throttle: only update every ~350 ms to avoid spamming LVGL lock
     static uint32_t last_update_ms = 0;
     uint32_t now = elapsed_ms_.load();
-    if (now < last_update_ms + 400 && now >= last_update_ms) return;
+    if (now < last_update_ms + 350 && now >= last_update_ms) return;
     last_update_ms = now;
 
-    int idx = GetCurrentLyricIndex();
-    if (idx < 0) return;
+    if (lyrics_lines_.empty()) return;
 
     auto display = Board::GetInstance().GetDisplay();
     if (!display) return;
+
+    int idx = GetCurrentLyricIndex();
+    if (idx < 0) {
+        // Instrumental intro before first lyric line
+        display->SetLyricsLine("", "♪ ♪ ♪", lyrics_lines_[0].text.c_str());
+        return;
+    }
 
     display->SetLyricsLine(
         idx > 0 ? lyrics_lines_[idx - 1].text.c_str() : "",
@@ -996,12 +1016,15 @@ void RadioPlayer::ShowLyrics() {
     }
 
     std::string video_id, title, query;
+    bool need_fetch = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         video_id = lyrics_video_id_;
         title = station_name_;
         query = station_name_;
-        lyrics_lines_.clear();  // clear stale lyrics
+        if (lyrics_lines_.empty()) {
+            need_fetch = true;
+        }
     }
 
     lyrics_enabled_.store(true);
@@ -1009,10 +1032,14 @@ void RadioPlayer::ShowLyrics() {
     auto display = Board::GetInstance().GetDisplay();
     if (display) {
         display->SetLyricsMode(true);
-        display->ShowNotification("Loading lyrics...", 2000);
+        if (need_fetch) {
+            display->ShowNotification("Loading lyrics...", 2000);
+        }
     }
 
-    FetchAndStoreLyrics(video_id, title, query);
+    if (need_fetch) {
+        FetchAndStoreLyrics(video_id, title, query);
+    }
 
     if (lyrics_lines_.empty()) {
         ESP_LOGW(TAG, "ShowLyrics: no lyrics found for '%s'", title.c_str());
@@ -1021,6 +1048,8 @@ void RadioPlayer::ShowLyrics() {
             display->SetLyricsMode(false);
             display->ShowNotification("No lyrics found", 2500);
         }
+    } else {
+        UpdateLyricsDisplay();
     }
 }
 
