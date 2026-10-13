@@ -1432,33 +1432,34 @@ void RadioPlayer::SendTelegramAsync(const std::string& message, const std::strin
 
         std::string bridge_host = RadioPlayer::GetBridgeHost();
         int bridge_port = MUSIC_BRIDGE_PORT;
-        std::string url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/telegram";
 
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "text", msg.c_str());
-        if (!pr.empty()) {
-            cJSON_AddStringToObject(root, "prompt", pr.c_str());
-        }
-        char* json_str = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-
-        if (json_str != nullptr) {
-            auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
-            if (http) {
-                http->SetTimeout(6000);
-                http->SetHeader("Content-Type", "application/json");
-                http->SetHeader("User-Agent", "XiaozhiRobot/1.0");
-                if (auto opened = http->Open("POST", url); opened) {
-                    http->Write(json_str, strlen(json_str));
-                    char dummy[128];
-                    http->Read(dummy, sizeof(dummy) - 1);
-                    http->Close();
-                    ESP_LOGI(TAG, "Sent message to Telegram via bridge (%u bytes)", (unsigned int)strlen(json_str));
-                } else {
-                    ESP_LOGW(TAG, "Failed to connect to bridge for Telegram: %s", url.c_str());
-                }
+        auto url_encode = [](const std::string& str) -> std::string {
+            std::string out;
+            for (char c : str) {
+                if (c == ' ') out += "+";
+                else if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.') out += c;
+                else { char hex[4]; snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c); out += hex; }
             }
-            cJSON_free(json_str);
+            return out;
+        };
+
+        std::string url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/telegram?text=" + url_encode(msg);
+        if (!pr.empty()) {
+            url += "&prompt=" + url_encode(pr);
+        }
+
+        auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+        if (http) {
+            http->SetTimeout(6000);
+            http->SetHeader("User-Agent", "XiaozhiRobot/1.0");
+            if (auto opened = http->Open("GET", url); opened) {
+                char dummy[128];
+                http->Read(dummy, sizeof(dummy) - 1);
+                http->Close();
+                ESP_LOGI(TAG, "Sent message to Telegram via bridge (%u chars)", (unsigned int)msg.size());
+            } else {
+                ESP_LOGW(TAG, "Failed to connect to bridge for Telegram: %s", url.c_str());
+            }
         }
         vTaskDelete(NULL);
     }, "tg_worker", 6144, param, 3, NULL);
@@ -1468,5 +1469,6 @@ void RadioPlayer::SendTelegramAsync(const std::string& message, const std::strin
         delete param;
     }
 }
+
 
 
