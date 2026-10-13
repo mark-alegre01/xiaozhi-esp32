@@ -581,8 +581,9 @@ void RadioPlayer::WorkerTask() {
             display->SetMusicPlaying(true);  // Show music animation on OLED
         }
 
-        // Reset elapsed time at playback start
-        elapsed_ms_.store(0);
+        // Reset playback timing at start
+        playback_started_.store(false);
+        playback_start_us_.store(0);
 
         // Lock output on speaker so idle timer doesn't disable I2S TX
         if (codec_ != nullptr) {
@@ -735,16 +736,14 @@ void RadioPlayer::WorkerTask() {
                                  (unsigned)out_frame.decoded_size);
                     }
 
-                    // Track elapsed playback time for lyric sync
-                    if (info.sample_rate > 0 && out_frame.decoded_size > 0) {
-                        int bytes_per_sample = sizeof(int16_t) * (info.channel >= 2 ? 2 : 1);
-                        uint32_t num_samples = out_frame.decoded_size / bytes_per_sample;
-                        uint32_t ms_this_frame = (num_samples * 1000) / info.sample_rate;
-                        elapsed_ms_.fetch_add(ms_this_frame);
-                        // If lyrics are enabled, push the current line to the display
-                        if (lyrics_enabled_.load()) {
-                            UpdateLyricsDisplay();
-                        }
+                    // Track wall-clock start time for lyric sync (only on first frame)
+                    if (!playback_started_.load()) {
+                        playback_start_us_.store(esp_timer_get_time());
+                        playback_started_.store(true);
+                    }
+                    // If lyrics are enabled, push the current line to the display
+                    if (lyrics_enabled_.load()) {
+                        UpdateLyricsDisplay();
                     }
 
                     std::vector<int16_t> mono_pcm;
@@ -832,14 +831,60 @@ cleanup:
         }
     }
     if (!stop_requested_.load() && frames_decoded > 0) {
-        ESP_LOGI(TAG, "Song finished completely (%d frames decoded). Stopping playback.", frames_decoded);
+        // Song finished naturally — restore talk mode fully
+        ESP_LOGI(TAG, "Song finished completely (%d frames decoded). Restoring talk mode.", frames_decoded);
+
+        // Capture song name before state changes
+        std::string finished_name;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            finished_name = station_name_;
+        }
+
         if (display) {
-            display->ShowNotification("Finished", 2500);
+            // 1. Hide lyrics overlay if it was active
+            if (lyrics_enabled_.load()) {
+                lyrics_enabled_.store(false);
+                display->SetLyricsMode(false);
+            }
+            // 2. Stop music animation → restore neutral robot face
+            display->SetMusicPlaying(false);
+            // 3. Show "Song Finished" notification with song name
+            std::string notif = finished_name.empty() ? "Song Finished" : (finished_name + " - Done");
+            // Truncate to ~20 chars for OLED readability
+            if (notif.size() > 20) notif = notif.substr(0, 17) + "...";
+            display->ShowNotification(notif.c_str(), 4000);
+            // 4. Set status label back to Ready
             display->SetStatus("Ready");
         }
+
+        // 5. Clear lyrics data for next song
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            lyrics_lines_.clear();
+            lyrics_video_id_.clear();
+        }
+        lyrics_enabled_.store(false);
+
+        // 6. Transition device state back to Idle so wake-word & voice commands work again
+        Application::GetInstance().Schedule([]{
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle ||
+                Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
+                return;  // already in a good state
+            }
+            Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+        });
     } else {
+        // Stopped by user or error — just reset status
         if (display) {
             display->SetStatus("Ready");
+        }
+        // Also clear lyrics state if active
+        if (lyrics_enabled_.load()) {
+            lyrics_enabled_.store(false);
+            if (display) display->SetLyricsMode(false);
+            std::lock_guard<std::mutex> lock(mutex_);
+            lyrics_lines_.clear();
         }
     }
 
@@ -947,9 +992,18 @@ void RadioPlayer::FetchAndStoreLyrics(const std::string& video_id, const std::st
     if (status_j && cJSON_IsString(status_j) && strcmp(status_j->valuestring, "ok") == 0 &&
         lines_j && cJSON_IsArray(lines_j)) {
         cJSON* track_j = cJSON_GetObjectItem(root, "track");
+        cJSON* delay_j = cJSON_GetObjectItem(root, "delay_ms");
         const char* track_name = (track_j && cJSON_IsString(track_j)) ? track_j->valuestring : "";
         int arr_size = cJSON_GetArraySize(lines_j);
         ESP_LOGI(TAG, "Lyrics fetched: track='%s' lines=%d", track_name, arr_size);
+
+        // Apply per-song timing offset (synced lyrics need buffer compensation; synthesized don't)
+        if (delay_j && cJSON_IsNumber(delay_j)) {
+            lyric_offset_ms_ = (int32_t)delay_j->valuedouble;
+            ESP_LOGI(TAG, "Lyric timing offset: %d ms", lyric_offset_ms_);
+        } else {
+            lyric_offset_ms_ = -800;  // default: compensate for ~800ms audio buffer fill delay
+        }
 
         std::vector<LyricLine> new_lines;
         new_lines.reserve(arr_size);
@@ -974,7 +1028,7 @@ void RadioPlayer::FetchAndStoreLyrics(const std::string& video_id, const std::st
 
 int RadioPlayer::GetCurrentLyricIndex() const {
     if (lyrics_lines_.empty()) return -1;
-    uint32_t now_ms = elapsed_ms_.load();
+    uint32_t now_ms = GetPlaybackElapsedMs();
     int idx = -1;
     for (int i = 0; i < (int)lyrics_lines_.size(); i++) {
         if ((uint32_t)lyrics_lines_[i].ms <= now_ms) idx = i;
@@ -984,11 +1038,11 @@ int RadioPlayer::GetCurrentLyricIndex() const {
 }
 
 void RadioPlayer::UpdateLyricsDisplay() {
-    // Throttle: only update every ~350 ms to avoid spamming LVGL lock
-    static uint32_t last_update_ms = 0;
-    uint32_t now = elapsed_ms_.load();
-    if (now < last_update_ms + 350 && now >= last_update_ms) return;
-    last_update_ms = now;
+    // Throttle: only update every ~350 ms using real wall-clock time
+    static int64_t last_update_us = 0;
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - last_update_us < 350000) return;  // 350 ms in microseconds
+    last_update_us = now_us;
 
     if (lyrics_lines_.empty()) return;
 

@@ -12,6 +12,9 @@
 #include "radio_player.h"
 
 #include <esp_log.h>
+#include <esp_sleep.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
@@ -385,6 +388,59 @@ private:
                     return std::unexpected("Failed to start news broadcast");
                 }
                 return "Now playing live news broadcast: " + name;
+            });
+
+        // ── System Control Tools ─────────────────────────────────────────────
+        mcp.AddTool(
+            "self.system.restart",
+            "Restart (reboot) the robot. Call this when the user says 'restart', 'reboot', 'reset the robot', "
+            "'start over', or requests a system restart. Stops any playing audio and reboots gracefully.",
+            PropertyList(),
+            [](const PropertyList& props) -> ToolResult {
+                // Stop any playing music first
+                if (RadioPlayer::GetInstance().IsPlaying()) {
+                    RadioPlayer::GetInstance().Stop();
+                }
+                auto display = Board::GetInstance().GetDisplay();
+                if (display) {
+                    display->ShowNotification("Restarting...", 2000);
+                    display->SetStatus("Restarting");
+                }
+                // Delay slightly so the notification renders and TTS response plays
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                Application::GetInstance().Reboot();
+                return std::string("Restarting the robot now...");
+            });
+
+        mcp.AddTool(
+            "self.system.shutdown",
+            "Shut down (power off / deep sleep) the robot. Call this when the user says 'shutdown', "
+            "'turn off', 'power off', 'go to sleep', 'goodnight robot', or asks to power down the device. "
+            "Stops all audio, shows a goodbye message, and puts the device into deep sleep.",
+            PropertyList(),
+            [](const PropertyList& props) -> ToolResult {
+                // Stop any playing music first
+                if (RadioPlayer::GetInstance().IsPlaying()) {
+                    RadioPlayer::GetInstance().Stop();
+                }
+                auto display = Board::GetInstance().GetDisplay();
+                if (display) {
+                    display->SetLyricsMode(false);
+                    display->SetMusicPlaying(false);
+                    display->ShowNotification("Shutting down...", 2000);
+                    display->SetStatus("Goodbye");
+                }
+                // Wait for TTS to finish playing the goodbye response
+                int wait_ms = 0;
+                while (Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking && wait_ms < 8000) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    wait_ms += 100;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                // Enter deep sleep (GPIO wake-up is not configured here, so this is full power-off)
+                // Users can wake it by pressing the boot/reset button
+                esp_deep_sleep_start();
+                return std::string("Shutting down...");
             });
     }
 
