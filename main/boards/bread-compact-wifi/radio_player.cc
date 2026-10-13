@@ -770,13 +770,12 @@ void RadioPlayer::WorkerTask() {
         http->Close();
     }
 
-    // Notify display that music stopped
+cleanup:
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    // Always clear music animation on any exit path (including goto cleanup)
     if (display) {
         display->SetMusicPlaying(false);
     }
-
-cleanup:
-    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     // Only clean up codec if Stop() hasn't already done so
     // (Stop() sets is_playing_=false and calls UnlockOutput before we reach here)
     if (codec_ != nullptr && is_playing_.load()) {
