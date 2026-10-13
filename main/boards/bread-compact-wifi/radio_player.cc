@@ -131,7 +131,7 @@ std::string RadioPlayer::GetCurrentStation() const {
 }
 
 std::string RadioPlayer::GetCurrentUrl() const {
-    return url_;
+    return current_playing_url_.empty() ? url_ : current_playing_url_;
 }
 
 void RadioPlayer::TaskTrampoline(void* arg) {
@@ -305,6 +305,7 @@ void RadioPlayer::Stop() {
     // Clear any pending song/stream so the worker won't restart after exiting
     pending_search_query_.clear();
     url_.clear();
+    current_playing_url_.clear();
 
     // Signal the streaming loop to stop
     stop_requested_.store(true);
@@ -340,11 +341,14 @@ void RadioPlayer::WorkerTask() {
     std::string search_query;
     std::string stream_url;
     std::string display_name;
+    int frames_decoded = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         search_query = pending_search_query_;
         pending_search_query_.clear();
         stream_url = url_;
+        url_.clear();  // Queued url consumed — won't loop!
+        current_playing_url_ = stream_url;
         display_name = station_name_;
     }
 
@@ -449,7 +453,7 @@ void RadioPlayer::WorkerTask() {
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            url_ = stream_url;
+            current_playing_url_ = stream_url;
             station_name_ = display_name;
         }
     }
@@ -579,7 +583,7 @@ void RadioPlayer::WorkerTask() {
         std::vector<uint8_t> acc_buf;
         acc_buf.reserve(kHttpReadBufSize * 4);
 
-        int frames_decoded = 0;
+        frames_decoded = 0;
         int consec_errors = 0;
         bool mp3_fallback_tried = false;
         constexpr int kMaxConsecErrors = 64;
@@ -795,16 +799,25 @@ cleanup:
             codec_->EnableOutput(false);
         }
     }
-    if (display) {
-        display->SetStatus("Ready");
+    if (!stop_requested_.load() && frames_decoded > 0) {
+        ESP_LOGI(TAG, "Song finished completely (%d frames decoded). Stopping playback.", frames_decoded);
+        if (display) {
+            display->ShowNotification("Finished", 2500);
+            display->SetStatus("Ready");
+        }
+    } else {
+        if (display) {
+            display->SetStatus("Ready");
+        }
     }
 
     // Check if PlaySong() or Play() queued a new song/stream while we were streaming.
     // If so, restart the worker immediately instead of terminating.
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        current_playing_url_.clear();
         if (!stop_requested_.load() && (!pending_search_query_.empty() || !url_.empty())) {
-            // A new song or stream was queued — restart
+            // A genuine new song or stream was queued — restart
             stop_requested_.store(false);
             is_playing_.store(true);
             ESP_LOGI(TAG, "Restarting worker for new stream/song");

@@ -171,16 +171,8 @@ bool OledDisplay::Lock(int timeout_ms) { return lvgl_port_lock(timeout_ms); }
 void OledDisplay::Unlock() { lvgl_port_unlock(); }
 
 void OledDisplay::SetChatMessage(const char* role, const char* content) {
-    if (content == nullptr || content[0] == '\0') return;
-
-    DisplayLockGuard lock(this);
-    if (height_ == 64 && face_image_ != nullptr) {
-        // Detect emotion animation from words spoken by user or assistant
-        const RobotAnimation* anim = DetectAnimationFromText(content);
-        if (anim != nullptr) {
-            PlayAnimationOnce(anim);
-        }
-    }
+    // Spoken conversational words must NOT trigger erratic, inappropriate emotional facial shifts.
+    // Talking mouth movement is handled cleanly and smoothly by SetStatus("Speaking").
 }
 
 void OledDisplay::SetStatus(const char* status) {
@@ -443,6 +435,9 @@ void OledDisplay::DrawFaceBitmap(const uint8_t* bitmap_1bit) {
 void OledDisplay::PlayAnimationOnce(const RobotAnimation* anim) {
     if (!anim || anim->frame_count <= 0 || !face_image_) return;
 
+    // Do NOT interrupt talking or music with emotion animations
+    if (is_speaking_ || is_music_playing_) return;
+
     if (anim_timer_ != nullptr) {
         lv_timer_del(anim_timer_);
         anim_timer_ = nullptr;
@@ -464,6 +459,17 @@ void OledDisplay::AnimTimerCallback(lv_timer_t* timer) {
     auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->is_animating_ || !self->active_anim_) return;
 
+    // If speaking or music started, abort animation immediately
+    if (self->is_speaking_ || self->is_music_playing_) {
+        self->is_animating_ = false;
+        self->active_anim_ = nullptr;
+        if (self->anim_timer_ != nullptr) {
+            lv_timer_del(self->anim_timer_);
+            self->anim_timer_ = nullptr;
+        }
+        return;
+    }
+
     self->anim_frame_idx_++;
     if (self->anim_frame_idx_ < self->active_anim_->frame_count) {
         self->DrawFaceBitmap(self->active_anim_->frames[self->anim_frame_idx_]);
@@ -475,7 +481,9 @@ void OledDisplay::AnimTimerCallback(lv_timer_t* timer) {
             lv_timer_del(self->anim_timer_);
             self->anim_timer_ = nullptr;
         }
-        self->DrawFaceBitmap(oled_face_neutral);
+        if (!self->is_speaking_ && !self->is_music_playing_) {
+            self->DrawFaceBitmap(oled_face_neutral);
+        }
     }
 }
 
@@ -607,6 +615,9 @@ void OledDisplay::SetEmotion(const char* emotion) {
     }
 
     if (!emotion || emotion[0] == '\0') return;
+
+    // Keep face consistent: never disrupt speaking mouth animation or music playback
+    if (is_speaking_ || is_music_playing_) return;
 
     const RobotAnimation* anim = GetAnimationForEmotion(emotion);
     if (anim != nullptr) {

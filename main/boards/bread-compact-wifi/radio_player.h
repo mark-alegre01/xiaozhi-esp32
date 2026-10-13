@@ -39,6 +39,7 @@ private:
 
     std::mutex mutex_;
     std::string url_;
+    std::string current_playing_url_;
     std::string station_name_;
     std::string pending_search_query_;
     std::atomic<bool> is_playing_{false};
