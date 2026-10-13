@@ -108,6 +108,14 @@ OledDisplay::~OledDisplay() {
         lv_timer_del(anim_timer_);
         anim_timer_ = nullptr;
     }
+    if (speak_timer_ != nullptr) {
+        lv_timer_del(speak_timer_);
+        speak_timer_ = nullptr;
+    }
+    if (music_anim_timer_ != nullptr) {
+        lv_timer_del(music_anim_timer_);
+        music_anim_timer_ = nullptr;
+    }
 
     if (content_ != nullptr) {
         lv_obj_del(content_);
@@ -186,9 +194,21 @@ void OledDisplay::SetStatus(const char* status) {
     DisplayLockGuard lock(this);
     if (speaking && !is_speaking_) {
         is_speaking_ = true;
+        // Stop any one-shot emotion animation and start the talking loop
+        if (anim_timer_ != nullptr) {
+            lv_timer_del(anim_timer_);
+            anim_timer_ = nullptr;
+            is_animating_ = false;
+            active_anim_ = nullptr;
+        }
+        StartSpeakingAnimation();
     } else if (!speaking && is_speaking_) {
         is_speaking_ = false;
-        if (!is_animating_) {
+        StopSpeakingAnimation();
+        // Resume music animation if music is playing, else show neutral
+        if (is_music_playing_) {
+            StartMusicAnimation();
+        } else if (!is_animating_) {
             DrawFaceBitmap(oled_face_neutral);
         }
     }
@@ -462,11 +482,110 @@ void OledDisplay::AnimTimerCallback(lv_timer_t* timer) {
 void OledDisplay::BlinkTimerCallback(lv_timer_t* timer) {
     auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
     if (!self || !self->face_image_) return;
-    // Do not blink if an animation is currently playing or speaking
-    if (self->is_animating_ || self->is_speaking_) return;
+    // Do not blink if an animation is currently playing, speaking, or music is looping
+    if (self->is_animating_ || self->is_speaking_ || self->is_music_playing_) return;
 
     // Smooth natural eye blink from the GIF (run6, 7 frames)
     self->PlayAnimationOnce(&oled_anim_blink);
+}
+
+// ── Speaking (talking mouth) animation ──────────────────────────────────────
+// Alternates neutral face with happy open-mouth frames to simulate talking.
+// Uses frames 8-12 of the happy animation (peak open-mouth phase).
+void OledDisplay::StartSpeakingAnimation() {
+    if (!face_image_) return;
+    if (speak_timer_ != nullptr) return;  // already running
+    speak_frame_idx_ = 0;
+    // Show first talking frame immediately
+    DrawFaceBitmap(oled_anim_happy_frames[8]);
+    // Alternate every 150ms – fast enough to look like talking
+    speak_timer_ = lv_timer_create(SpeakTimerCallback, 150, this);
+}
+
+void OledDisplay::StopSpeakingAnimation() {
+    if (speak_timer_ != nullptr) {
+        lv_timer_del(speak_timer_);
+        speak_timer_ = nullptr;
+    }
+    speak_frame_idx_ = 0;
+}
+
+void OledDisplay::SpeakTimerCallback(lv_timer_t* timer) {
+    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
+    if (!self || !self->face_image_ || !self->is_speaking_) return;
+
+    // Cycle 4 frames: closed, open1, open2, open3 to animate talking
+    // Frame sequence: neutral, happy[8], neutral, happy[10]
+    static const uint8_t* const kTalkFrames[] = {
+        oled_face_neutral,
+        oled_anim_happy_frames[8],
+        oled_face_neutral,
+        oled_anim_happy_frames[10],
+    };
+    constexpr int kTalkFrameCount = 4;
+    self->DrawFaceBitmap(kTalkFrames[self->speak_frame_idx_ % kTalkFrameCount]);
+    self->speak_frame_idx_++;
+    if (self->speak_frame_idx_ >= kTalkFrameCount * 8) {
+        self->speak_frame_idx_ = 0;  // wrap without overflow
+    }
+}
+
+// ── Music playing looped animation ──────────────────────────────────────────
+void OledDisplay::StartMusicAnimation() {
+    if (!face_image_) return;
+    if (music_anim_timer_ != nullptr) return;  // already running
+    music_frame_idx_ = 0;
+    DrawFaceBitmap(oled_anim_happy_frames[0]);
+    // Slow 120ms per frame – plays happy face gently bobbing while music runs
+    music_anim_timer_ = lv_timer_create(MusicAnimTimerCallback, 120, this);
+}
+
+void OledDisplay::StopMusicAnimation() {
+    if (music_anim_timer_ != nullptr) {
+        lv_timer_del(music_anim_timer_);
+        music_anim_timer_ = nullptr;
+    }
+    music_frame_idx_ = 0;
+}
+
+void OledDisplay::MusicAnimTimerCallback(lv_timer_t* timer) {
+    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
+    if (!self || !self->face_image_ || !self->is_music_playing_) return;
+    // Don't override speaking animation
+    if (self->is_speaking_) return;
+
+    // Loop through all 18 happy frames continuously
+    constexpr int kFrameCount = 18;
+    self->DrawFaceBitmap(oled_anim_happy_frames[self->music_frame_idx_ % kFrameCount]);
+    self->music_frame_idx_++;
+    if (self->music_frame_idx_ >= kFrameCount) {
+        self->music_frame_idx_ = 0;
+    }
+}
+
+void OledDisplay::SetMusicPlaying(bool playing) {
+    if (height_ != 64 || face_image_ == nullptr) return;
+    DisplayLockGuard lock(this);
+    if (playing && !is_music_playing_) {
+        is_music_playing_ = true;
+        // Don't interrupt speaking animation; music anim will start after TTS ends
+        if (!is_speaking_) {
+            // Stop any one-shot emotion animation
+            if (anim_timer_ != nullptr) {
+                lv_timer_del(anim_timer_);
+                anim_timer_ = nullptr;
+                is_animating_ = false;
+                active_anim_ = nullptr;
+            }
+            StartMusicAnimation();
+        }
+    } else if (!playing && is_music_playing_) {
+        is_music_playing_ = false;
+        StopMusicAnimation();
+        if (!is_speaking_ && !is_animating_) {
+            DrawFaceBitmap(oled_face_neutral);
+        }
+    }
 }
 
 void OledDisplay::SetEmotion(const char* emotion) {

@@ -33,11 +33,26 @@ private:
     bool is_animating_ = false;
     bool is_speaking_ = false;
 
+    // Looping speaking/talking animation
+    lv_timer_t* speak_timer_ = nullptr;
+    int speak_frame_idx_ = 0;
+
+    // Looping music animation
+    lv_timer_t* music_anim_timer_ = nullptr;
+    int music_frame_idx_ = 0;
+    bool is_music_playing_ = false;
+
     void CreateRobotEyes(lv_obj_t* parent);
     void DrawFaceBitmap(const uint8_t* bitmap_1bit);
     void PlayAnimationOnce(const RobotAnimation* anim);
+    void StartSpeakingAnimation();
+    void StopSpeakingAnimation();
+    void StartMusicAnimation();
+    void StopMusicAnimation();
     static void AnimTimerCallback(lv_timer_t* timer);
     static void BlinkTimerCallback(lv_timer_t* timer);
+    static void SpeakTimerCallback(lv_timer_t* timer);
+    static void MusicAnimTimerCallback(lv_timer_t* timer);
 
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
@@ -57,6 +72,7 @@ public:
     virtual void SetTheme(Theme* theme) override;
     virtual bool IsMonochrome() const override { return true; }
     void SetPowerSaveMode(bool on) override;
+    void SetMusicPlaying(bool playing);
 };
 
 #endif  // OLED_DISPLAY_H

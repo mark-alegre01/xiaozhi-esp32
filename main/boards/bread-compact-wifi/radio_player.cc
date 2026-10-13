@@ -328,6 +328,7 @@ void RadioPlayer::Stop() {
     if (display) {
         display->ShowNotification("Stopped", 2000);
         display->SetStatus("Ready");
+        display->SetMusicPlaying(false);  // Stop music animation
     }
     ESP_LOGI(TAG, "Radio stop signalled; worker will clean up asynchronously");
 }
@@ -545,6 +546,7 @@ void RadioPlayer::WorkerTask() {
         if (display) {
             display->ShowNotification(display_name, 3000);
             display->SetStatus("Playing");
+            display->SetMusicPlaying(true);  // Show music animation on OLED
         }
 
         // Lock output on speaker so idle timer doesn't disable I2S TX
@@ -766,6 +768,11 @@ void RadioPlayer::WorkerTask() {
         }
         esp_audio_simple_dec_close(dec_handle);
         http->Close();
+    }
+
+    // Notify display that music stopped
+    if (display) {
+        display->SetMusicPlaying(false);
     }
 
 cleanup:
