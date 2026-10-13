@@ -442,6 +442,31 @@ private:
                 esp_deep_sleep_start();
                 return std::string("Shutting down...");
             });
+
+        // ── Telegram Tool ─────────────────────────────────────────────────────
+        mcp.AddTool(
+            "self.telegram.send_message",
+            "Send a message, note, reminder, or response to the user's Telegram chat. "
+            "Call this tool when the user says 'send to my telegram', 'message me on telegram', "
+            "'telegram me this', 'send a telegram', or asks to forward/save text or notes to Telegram.",
+            PropertyList({Property("message", kPropertyTypeString, "The message text or note to send to Telegram")}),
+            [](const PropertyList& props) -> ToolResult {
+                std::string message;
+                for (const auto& p : props) {
+                    if (p.name == "message" && !p.value.empty()) {
+                        message = p.value;
+                    }
+                }
+                if (message.empty()) {
+                    return std::unexpected("No message text provided.");
+                }
+                RadioPlayer::SendTelegramAsync(message, "Voice Request");
+                auto display = Board::GetInstance().GetDisplay();
+                if (display) {
+                    display->ShowNotification("Sent to TG", 2000);
+                }
+                return "Successfully sent the message to your Telegram!";
+            });
     }
 
 public:
@@ -454,6 +479,10 @@ public:
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeTools();
+    }
+
+    virtual void OnConversationCompleted(const std::string& user_text, const std::string& assistant_text) override {
+        RadioPlayer::SendTelegramAsync(assistant_text, user_text);
     }
 
     virtual Led* GetLed() override {

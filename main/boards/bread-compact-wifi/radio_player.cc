@@ -1415,4 +1415,58 @@ std::string RadioPlayer::FetchNewsHeadlines(const std::string& category) {
     return summary;
 }
 
+struct TelegramParam {
+    std::string message;
+    std::string prompt;
+};
+
+void RadioPlayer::SendTelegramAsync(const std::string& message, const std::string& prompt) {
+    if (message.empty() && prompt.empty()) return;
+
+    auto* param = new TelegramParam{message, prompt};
+    BaseType_t ret = xTaskCreate([](void* arg) {
+        auto* p = static_cast<TelegramParam*>(arg);
+        std::string msg = p->message;
+        std::string pr = p->prompt;
+        delete p;
+
+        std::string bridge_host = RadioPlayer::GetBridgeHost();
+        int bridge_port = MUSIC_BRIDGE_PORT;
+        std::string url = "http://" + bridge_host + ":" + std::to_string(bridge_port) + "/telegram";
+
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "text", msg.c_str());
+        if (!pr.empty()) {
+            cJSON_AddStringToObject(root, "prompt", pr.c_str());
+        }
+        char* json_str = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+
+        if (json_str != nullptr) {
+            auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+            if (http) {
+                http->SetTimeout(6000);
+                http->SetHeader("Content-Type", "application/json");
+                http->SetHeader("User-Agent", "XiaozhiRobot/1.0");
+                if (auto opened = http->Open("POST", url); opened) {
+                    http->Write(json_str, strlen(json_str));
+                    char dummy[128];
+                    http->Read(dummy, sizeof(dummy) - 1);
+                    http->Close();
+                    ESP_LOGI(TAG, "Sent message to Telegram via bridge (%u bytes)", (unsigned int)strlen(json_str));
+                } else {
+                    ESP_LOGW(TAG, "Failed to connect to bridge for Telegram: %s", url.c_str());
+                }
+            }
+            cJSON_free(json_str);
+        }
+        vTaskDelete(NULL);
+    }, "tg_worker", 6144, param, 3, NULL);
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to spawn Telegram forwarding task");
+        delete param;
+    }
+}
+
 

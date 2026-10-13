@@ -82,6 +82,10 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+    virtual void OnConversationCompleted(const std::string& user_text, const std::string& assistant_text) {
+        (void)user_text;
+        (void)assistant_text;
+    }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

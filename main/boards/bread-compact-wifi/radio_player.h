@@ -41,6 +41,7 @@ public:
     static std::string FetchNewsHeadlines(const std::string& category = "philippines");
     static std::string GetBridgeHost();
     static void DiscoverBridge();
+    static void SendTelegramAsync(const std::string& message, const std::string& prompt = "");
     std::string PlaySongOrFallback(const std::string& query);
 
 private:

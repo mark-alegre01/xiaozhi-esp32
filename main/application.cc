@@ -622,11 +622,17 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                accumulated_tts_response_.clear();
                 Schedule([this]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                if (!aborted_ && !accumulated_tts_response_.empty()) {
+                    Board::GetInstance().OnConversationCompleted(last_user_stt_, accumulated_tts_response_);
+                }
+                last_user_stt_.clear();
+                accumulated_tts_response_.clear();
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
@@ -639,6 +645,10 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
+                    if (!accumulated_tts_response_.empty()) {
+                        accumulated_tts_response_ += " ";
+                    }
+                    accumulated_tts_response_ += text->valuestring;
                     std::vector<TextGlyph> glyphs;
                     uint8_t bpp = 0;
                     if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
@@ -655,6 +665,7 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
+                last_user_stt_ = text->valuestring;
                 std::vector<TextGlyph> glyphs;
                 uint8_t bpp = 0;
                 if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
